@@ -1,13 +1,11 @@
 import { ImageProcessor } from "@/imageProcessing/imageProcessor";
 import { BrevilabsClient, Url4llmResponse } from "@/LLMProviders/brevilabsClient";
-import { err2String, isYoutubeUrl } from "@/utils";
-import { logError } from "@/logger";
+import { isYoutubeUrl } from "@/utils";
 
 export interface MentionData {
   type: string;
   original: string;
   processed?: string;
-  error?: string;
 }
 
 export class Mention {
@@ -43,30 +41,24 @@ export class Mention {
       .filter((url) => !isYoutubeUrl(url));
   }
 
-  async processUrl(url: string): Promise<Url4llmResponse & { error?: string }> {
+  async processUrl(url: string): Promise<Url4llmResponse> {
     try {
       return await this.brevilabsClient.url4llm(url);
     } catch (error) {
-      const msg = err2String(error);
-      logError(`Error processing URL ${url}: ${msg}`);
-      return { response: url, elapsed_time_ms: 0, error: msg };
+      console.error(`Error processing URL ${url}:`, error);
+      return { response: url, elapsed_time_ms: 0 };
     }
   }
 
   // For non-youtube URLs
-  async processUrls(text: string): Promise<{
-    urlContext: string;
-    imageUrls: string[];
-    processedErrorUrls: Record<string, string>;
-  }> {
+  async processUrls(text: string): Promise<{ urlContext: string; imageUrls: string[] }> {
     const urls = this.extractUrls(text);
     let urlContext = "";
     const imageUrls: string[] = [];
-    const processedErrorUrls: Record<string, string> = {};
 
     // Return empty string if no URLs to process
     if (urls.length === 0) {
-      return { urlContext, imageUrls, processedErrorUrls };
+      return { urlContext: "", imageUrls: [] };
     }
 
     // Process all URLs concurrently
@@ -83,7 +75,6 @@ export class Mention {
           type: "url",
           original: url,
           processed: processed.response,
-          error: processed.error,
         });
       }
       return this.mentions.get(url);
@@ -94,15 +85,11 @@ export class Mention {
     // Append all processed content
     processedUrls.forEach((urlData) => {
       if (urlData?.processed) {
-        urlContext += `\n\n<url_content>\n<url>${urlData.original}</url>\n<content>\n${urlData.processed}\n</content>\n</url_content>`;
-      }
-
-      if (urlData?.error) {
-        processedErrorUrls[urlData.original] = urlData.error;
+        urlContext += `\n\nContent from ${urlData.original}:\n${urlData.processed}`;
       }
     });
 
-    return { urlContext, imageUrls, processedErrorUrls };
+    return { urlContext, imageUrls };
   }
 
   getMentions(): Map<string, MentionData> {

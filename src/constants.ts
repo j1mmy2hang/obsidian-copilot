@@ -9,11 +9,7 @@ export const BREVILABS_API_BASE_URL = "https://api.brevilabs.com/v1";
 export const CHAT_VIEWTYPE = "copilot-chat-view";
 export const USER_SENDER = "user";
 export const AI_SENDER = "ai";
-
-// Default folder names
-export const DEFAULT_CHAT_HISTORY_FOLDER = "copilot-conversations";
-export const DEFAULT_CUSTOM_PROMPTS_FOLDER = "copilot-custom-prompts";
-export const DEFAULT_SYSTEM_PROMPT = `You are Obsidian Copilot, a helpful assistant that integrates AI to Obsidian note-taking.
+export const DEFAULT_SYSTEM_PROMPT = `You are Jimmy's Copilot, a helpful assistant that integrates AI to his knowledge vault.
   1. Never mention that you do not have access to something. Always rely on the user provided context.
   2. Always answer to the best of your knowledge. If you are unsure about something, say so and ask the user to provide more context.
   3. If the user mentions "note", it most likely means an Obsidian note in the vault, not the generic meaning of a note.
@@ -23,77 +19,73 @@ export const DEFAULT_SYSTEM_PROMPT = `You are Obsidian Copilot, a helpful assist
   7. When showing note titles, use [[title]] format and do not wrap them in \` \`.
   8. When showing **Obsidian internal** image links, use ![[link]] format and do not wrap them in \` \`.
   9. When showing **web** image links, use ![link](url) format and do not wrap them in \` \`.
-  10. When generating a table, format as github markdown tables, however, for table headings, immediately add ' |' after the table heading.
-  11. Always respond in the language of the user's query.
-  12. Do NOT mention the additional context provided such as getCurrentTime and getTimeRangeMs if it's irrelevant to the user message.
-  13. If the user mentions "tags", it most likely means tags in Obsidian note properties.
-  14. YouTube URLs: If the user provides YouTube URLs in their message, transcriptions will be automatically fetched and provided to you. You don't need to do anything special - just use the transcription content if available.`;
+  10. When generating a table, use compact formatting without excessive whitespace.
+  11. Respond in the language of the user's query.
+  12. Do NOT mention the additional context provided such as getCurrentTime and getTimeRangeMs if it's irrelevant to the user message.`;
 
-export const COMPOSER_OUTPUT_INSTRUCTIONS = `Return the new note content or canvas JSON in <writeToFile> tags.
+export const COMPOSER_OUTPUT_INSTRUCTIONS = `Return the new note content or canvas JSON in a special JSON format.
 
   # Steps to find the the target notes
   1. Extract the target note information from user message and find out the note path from the context below.
   2. If target note is not specified, use the <active_note> as the target note.
   3. If still failed to find the target note or the note path, ask the user to specify the target note.
 
-  # Examples
+  # JSON Format
+  Provide the content in JSON format and wrap it in a code block with the following structure:
 
-  Input: Add a new section to note A
-  Output:
-  <writeToFile>
-  <path>path/to/file.md</path>
-  <content>The FULL CONTENT of the note A with added section goes here</content>
-  </writeToFile>
-
-  Input: Create a new canvas with "Hello, world!"
-  Output:
-  <writeToFile>
-  <path>path/to/file.canvas</path>
-  <content>
+  For a single markdown file:
+  \`\`\`json
   {
-    "nodes": [
-      {
-        "id": "1",
-        "type": "text",
-        "text": "Hello, world!",
-        "x": 0,
-        "y": 0,
-        "width": 200,
-        "height": 50
-      }
-    ],
-    "edges": [
-      {
-        "id": "e1-2",
-        "fromNode": "1",
-        "toNode": "2",
-        "label": "connects to"
-      }
-    ]
+    "type": "composer",
+    "path": "path/to/file.md",
+    "content": "The FULL CONTENT of the md note goes here"
   }
-  </content>
-  </writeToFile>
+  \`\`\`
+
+  For a canvas file:
+  \`\`\`json
+  {
+    "type": "composer",
+    "path": "path/to/file.canvas",
+    "canvas_json": {
+      "nodes": [
+        {
+          "id": "1",
+          "type": "text",
+          "text": "Hello, world!",
+          "x": 0,
+          "y": 0,
+          "width": 200,
+          "height": 50
+        }
+      ],
+      "edges": [
+        {
+          "id": "e1-2",
+          "fromNode": "1",
+          "toNode": "2",
+          "label": "connects to"
+        }
+      ]
+    }
+  }
+  \`\`\`
 
   # Important
-  # The content within the <content> tags for canvas files is in JSON format.
+  * ALL JSON objects must be complete and valid - ensure all arrays and objects have matching closing brackets
   * For canvas files, both 'nodes' and 'edges' arrays must be properly closed with ]
+  * Properly escape all special characters in the content field, especially backticks and quotes
   * Prefer to create new files in existing folders or root folder unless the user's request specifies otherwise
   * File paths must end with a .md or .canvas extension
-  * When generating changes on multiple files, output multiple <writeToFile> tags
+  * When generating changes on multiple files, output multiple JSON objects
+  * Each JSON object must be parseable independently
   * For canvas files:
     - Every node must have: id, type, x, y, width, height
     - Every edge must have: id, fromNode, toNode
     - All IDs must be unique
-    - Edge fromNode and toNode must reference existing node IDs.
-  `;
+    - Edge fromNode and toNode must reference existing node IDs`;
 
 export const NOTE_CONTEXT_PROMPT_TAG = "note_context";
-export const SELECTED_TEXT_TAG = "selected_text";
-export const VARIABLE_TAG = "variable";
-export const VARIABLE_NOTE_TAG = "variable_note";
-export const EMBEDDED_PDF_TAG = "embedded_pdf";
-export const VAULT_NOTE_TAG = "vault_note";
-export const RETRIEVED_DOCUMENT_TAG = "retrieved_document";
 export const EMPTY_INDEX_ERROR_MESSAGE =
   "Copilot index does not exist. Please index your vault first!\n\n1. Set a working embedding model in QA settings. If it's not a local model, don't forget to set the API key. \n\n2. Click 'Refresh Index for Vault' and wait for indexing to complete. If you encounter the rate limiting error, please turn your request per second down in QA setting.";
 export const CHUNK_SIZE = 6000;
@@ -122,9 +114,6 @@ export const DEFAULT_MODEL_SETTING = {
 
 export enum ChatModels {
   COPILOT_PLUS_FLASH = "copilot-plus-flash",
-  GPT_5 = "gpt-5",
-  GPT_5_mini = "gpt-5-mini",
-  GPT_5_nano = "gpt-5-nano",
   GPT_41 = "gpt-4.1",
   GPT_41_mini = "gpt-4.1-mini",
   GPT_41_nano = "gpt-4.1-nano",
@@ -132,7 +121,6 @@ export enum ChatModels {
   AZURE_OPENAI = "azure-openai",
   GEMINI_PRO = "gemini-2.5-pro",
   GEMINI_FLASH = "gemini-2.5-flash",
-  GEMINI_FLASH_LITE = "gemini-2.5-flash-lite",
   CLAUDE_3_5_SONNET = "claude-3-5-sonnet-latest",
   CLAUDE_3_7_SONNET = "claude-3-7-sonnet-latest",
   CLAUDE_4_SONNET = "claude-sonnet-4-20250514",
@@ -148,7 +136,7 @@ export enum ChatModels {
   DEEPSEEK_CHAT = "deepseek-chat",
   OPENROUTER_GEMINI_2_5_FLASH = "google/gemini-2.5-flash",
   OPENROUTER_GEMINI_2_5_PRO = "google/gemini-2.5-pro",
-  OPENROUTER_GEMINI_2_5_FLASH_LITE = "google/gemini-2.5-flash-lite",
+  OPENROUTER_GEMINI_2_5_FLASH_LITE = "google/gemini-2.5-flash-lite-preview-06-17",
 }
 
 // Model Providers
@@ -220,30 +208,6 @@ export const BUILTIN_CHAT_MODELS: CustomModel[] = [
     capabilities: [ModelCapability.VISION],
   },
   {
-    name: ChatModels.GPT_5,
-    provider: ChatModelProviders.OPENAI,
-    enabled: true,
-    isBuiltIn: true,
-    core: true,
-    capabilities: [ModelCapability.VISION],
-  },
-  {
-    name: ChatModels.GPT_5_mini,
-    provider: ChatModelProviders.OPENAI,
-    enabled: true,
-    isBuiltIn: true,
-    core: true,
-    capabilities: [ModelCapability.VISION],
-  },
-  {
-    name: ChatModels.GPT_5_nano,
-    provider: ChatModelProviders.OPENAI,
-    enabled: true,
-    isBuiltIn: true,
-    core: true,
-    capabilities: [ModelCapability.VISION],
-  },
-  {
     name: ChatModels.GPT_41,
     provider: ChatModelProviders.OPENAI,
     enabled: true,
@@ -266,7 +230,16 @@ export const BUILTIN_CHAT_MODELS: CustomModel[] = [
     provider: ChatModelProviders.OPENAI,
     enabled: true,
     isBuiltIn: true,
+    core: true,
     capabilities: [ModelCapability.VISION],
+  },
+  {
+    name: ChatModels.O4_mini,
+    provider: ChatModelProviders.OPENAI,
+    enabled: true,
+    isBuiltIn: true,
+    core: true,
+    capabilities: [ModelCapability.REASONING],
   },
   {
     name: ChatModels.CLAUDE_4_SONNET,
@@ -281,6 +254,20 @@ export const BUILTIN_CHAT_MODELS: CustomModel[] = [
     enabled: true,
     isBuiltIn: true,
     capabilities: [ModelCapability.VISION, ModelCapability.REASONING],
+  },
+  {
+    name: ChatModels.CLAUDE_3_5_SONNET,
+    provider: ChatModelProviders.ANTHROPIC,
+    enabled: true,
+    isBuiltIn: true,
+    core: true,
+    capabilities: [ModelCapability.VISION],
+  },
+  {
+    name: ChatModels.CLAUDE_3_5_HAIKU,
+    provider: ChatModelProviders.ANTHROPIC,
+    enabled: true,
+    isBuiltIn: true,
   },
   {
     name: ChatModels.GROK3,
@@ -303,7 +290,7 @@ export const BUILTIN_CHAT_MODELS: CustomModel[] = [
     capabilities: [ModelCapability.VISION],
   },
   {
-    name: ChatModels.GEMINI_FLASH_LITE,
+    name: ChatModels.GEMINI_PRO,
     provider: ChatModelProviders.GOOGLE,
     enabled: true,
     isBuiltIn: true,
@@ -311,12 +298,16 @@ export const BUILTIN_CHAT_MODELS: CustomModel[] = [
     capabilities: [ModelCapability.VISION],
   },
   {
-    name: ChatModels.GEMINI_PRO,
-    provider: ChatModelProviders.GOOGLE,
+    name: ChatModels.COMMAND_R,
+    provider: ChatModelProviders.COHEREAI,
     enabled: true,
     isBuiltIn: true,
-    projectEnabled: true,
-    capabilities: [ModelCapability.VISION],
+  },
+  {
+    name: ChatModels.COMMAND_R_PLUS,
+    provider: ChatModelProviders.COHEREAI,
+    enabled: true,
+    isBuiltIn: true,
   },
   {
     name: ChatModels.AZURE_OPENAI,
@@ -591,7 +582,7 @@ export enum DEFAULT_OPEN_AREA {
 }
 
 export const COMMAND_IDS = {
-  TRIGGER_QUICK_COMMAND: "trigger-quick-command",
+  APPLY_ADHOC_PROMPT: "apply-adhoc-prompt",
   CLEAR_LOCAL_COPILOT_INDEX: "clear-local-copilot-index",
   CLEAR_COPILOT_CACHE: "clear-copilot-cache",
   COUNT_WORD_AND_TOKENS_SELECTION: "count-word-and-tokens-selection",
@@ -610,12 +601,10 @@ export const COMMAND_IDS = {
   TOGGLE_COPILOT_CHAT_WINDOW: "chat-toggle-window",
   TOGGLE_AUTOCOMPLETE: "toggle-autocomplete",
   ADD_SELECTION_TO_CHAT_CONTEXT: "add-selection-to-chat-context",
-  ADD_CUSTOM_COMMAND: "add-custom-command",
-  APPLY_CUSTOM_COMMAND: "apply-custom-command",
 } as const;
 
 export const COMMAND_NAMES: Record<CommandId, string> = {
-  [COMMAND_IDS.TRIGGER_QUICK_COMMAND]: "Trigger quick command",
+  [COMMAND_IDS.APPLY_ADHOC_PROMPT]: "Apply ad-hoc custom prompt",
   [COMMAND_IDS.CLEAR_LOCAL_COPILOT_INDEX]: "Clear local Copilot index",
   [COMMAND_IDS.CLEAR_COPILOT_CACHE]: "Clear Copilot cache",
   [COMMAND_IDS.COUNT_TOTAL_VAULT_TOKENS]: "Count total tokens in your vault",
@@ -635,8 +624,6 @@ export const COMMAND_NAMES: Record<CommandId, string> = {
   [COMMAND_IDS.TOGGLE_COPILOT_CHAT_WINDOW]: "Toggle Copilot Chat Window",
   [COMMAND_IDS.TOGGLE_AUTOCOMPLETE]: "Toggle autocomplete",
   [COMMAND_IDS.ADD_SELECTION_TO_CHAT_CONTEXT]: "Add selection to chat context",
-  [COMMAND_IDS.ADD_CUSTOM_COMMAND]: "Add new custom command",
-  [COMMAND_IDS.APPLY_CUSTOM_COMMAND]: "Apply custom command",
 };
 
 export type CommandId = (typeof COMMAND_IDS)[keyof typeof COMMAND_IDS];
@@ -667,7 +654,7 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   xaiApiKey: "",
   mistralApiKey: "",
   deepseekApiKey: "",
-  defaultChainType: ChainType.LLM_CHAIN,
+  defaultChainType: ChainType.PROJECT_CHAIN,
   defaultModelKey: ChatModels.GPT_41 + "|" + ChatModelProviders.OPENAI,
   embeddingModelKey: EmbeddingModels.OPENAI_EMBEDDING_SMALL + "|" + EmbeddingModelProviders.OPENAI,
   temperature: DEFAULT_MODEL_SETTING.TEMPERATURE,
@@ -677,14 +664,14 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   openAIProxyBaseUrl: "",
   openAIEmbeddingProxyBaseUrl: "",
   stream: true,
-  defaultSaveFolder: DEFAULT_CHAT_HISTORY_FOLDER,
+  defaultSaveFolder: "copilot-conversations",
   defaultConversationTag: "copilot-conversation",
   autosaveChat: false,
   includeActiveNoteAsContext: true,
   defaultOpenArea: DEFAULT_OPEN_AREA.VIEW,
-  customPromptsFolder: DEFAULT_CUSTOM_PROMPTS_FOLDER,
+  customPromptsFolder: "copilot-custom-prompts",
   indexVaultToVectorStore: VAULT_VECTOR_STORE_STRATEGY.ON_MODE_SWITCH,
-  qaExclusions: `${DEFAULT_CHAT_HISTORY_FOLDER},${DEFAULT_CUSTOM_PROMPTS_FOLDER}`,
+  qaExclusions: "",
   qaInclusions: "",
   chatNoteContextPath: "",
   chatNoteContextTags: [],
@@ -707,26 +694,14 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   /** @deprecated */
   inlineEditCommands: [],
   projectList: [],
-  enableAutocomplete: false,
+  enableAutocomplete: true,
   autocompleteAcceptKey: AUTOCOMPLETE_CONFIG.KEYBIND,
   allowAdditionalContext: true,
   enableWordCompletion: false,
   lastDismissedVersion: null,
   passMarkdownImages: true,
-  enableAutonomousAgent: false,
   enableCustomPromptTemplating: true,
   suggestedDefaultCommands: false,
-  autonomousAgentMaxIterations: 4,
-  autonomousAgentEnabledToolIds: [
-    "localSearch",
-    "webSearch",
-    "pomodoro",
-    "youtubeTranscription",
-    "writeToFile",
-    "replaceInFile",
-  ],
-  reasoningEffort: "low",
-  verbosity: "medium",
 };
 
 export const EVENT_NAMES = {

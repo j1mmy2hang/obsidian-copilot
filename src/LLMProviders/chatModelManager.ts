@@ -8,13 +8,7 @@ import {
 import { getDecryptedKey } from "@/encryptionService";
 import { logError, logInfo } from "@/logger";
 import { getModelKeyFromModel, getSettings, subscribeToSettingsChange } from "@/settings/model";
-import {
-  err2String,
-  getModelInfo,
-  ModelInfo,
-  safeFetch,
-  withSuppressedTokenWarnings,
-} from "@/utils";
+import { err2String, isOSeriesModel, safeFetch, withSuppressedTokenWarnings } from "@/utils";
 import { HarmBlockThreshold, HarmCategory } from "@google/generative-ai";
 import { ChatAnthropic } from "@langchain/anthropic";
 import { ChatCohere } from "@langchain/cohere";
@@ -95,65 +89,43 @@ export default class ChatModelManager {
     return ChatModelManager.instance;
   }
 
-  private static readonly REASONING_MODEL_TEMPERATURE = 1;
-
-  /**
-   * Determines the appropriate temperature for a model
-   * @returns temperature value or undefined if temperature should not be set
-   */
-  private getTemperatureForModel(
-    modelInfo: ModelInfo,
-    customModel: CustomModel,
-    settings: any
-  ): number | undefined {
-    // Thinking-enabled models don't accept temperature
-    if (modelInfo.isThinkingEnabled) {
-      return undefined;
-    }
-
-    // O-series and GPT-5 models require temperature = 1
-    if (modelInfo.isOSeries || modelInfo.isGPT5) {
-      return ChatModelManager.REASONING_MODEL_TEMPERATURE;
-    }
-
-    // All other models use configured temperature
-    return customModel.temperature ?? settings.temperature;
-  }
-
   private async getModelConfig(customModel: CustomModel): Promise<ModelConfig> {
     const settings = getSettings();
 
     const modelName = customModel.name;
-    const modelInfo = getModelInfo(modelName);
-    const { isThinkingEnabled } = modelInfo;
+    const isOSeries = isOSeriesModel(modelName);
+    const isThinkingEnabled =
+      modelName.startsWith("claude-3-7-sonnet") || modelName.startsWith("claude-sonnet-4");
 
-    // Base config - temperature will be handled by provider-specific methods
-    const baseConfig: Omit<ModelConfig, "maxTokens" | "maxCompletionTokens"> = {
+    // Base config without temperature when thinking is enabled
+    const baseConfig: Omit<ModelConfig, "maxTokens" | "maxCompletionTokens" | "temperature"> = {
       modelName: modelName,
       streaming: customModel.stream ?? true,
       maxRetries: 3,
       maxConcurrency: 3,
       enableCors: customModel.enableCors,
-      // Add temperature for normal models (will be overridden by special configs if needed)
-      ...(!isThinkingEnabled && { temperature: customModel.temperature ?? settings.temperature }),
     };
+
+    // Add temperature only if thinking is not enabled
+    if (!isThinkingEnabled) {
+      (baseConfig as any).temperature = customModel.temperature ?? settings.temperature;
+    }
 
     const providerConfig: {
       [K in keyof ChatProviderConstructMap]: ConstructorParameters<ChatProviderConstructMap[K]>[0];
     } = {
       [ChatModelProviders.OPENAI]: {
         modelName: modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.openAIApiKey),
+        openAIApiKey: await getDecryptedKey(customModel.apiKey || settings.openAIApiKey),
         configuration: {
           baseURL: customModel.baseUrl,
           fetch: customModel.enableCors ? safeFetch : undefined,
           organization: await getDecryptedKey(customModel.openAIOrgId || settings.openAIOrgId),
         },
-        ...this.getOpenAISpecialConfig(
-          modelName,
+        ...this.handleOpenAIExtraArgs(
+          isOSeries,
           customModel.maxTokens ?? settings.maxTokens,
-          customModel.temperature ?? settings.temperature,
-          customModel
+          customModel.temperature ?? settings.temperature
         ),
       },
       [ChatModelProviders.ANTHROPIC]: {
@@ -168,13 +140,13 @@ export default class ChatModelManager {
           fetch: customModel.enableCors ? safeFetch : undefined,
         },
         ...(isThinkingEnabled && {
-          thinking: { type: "enabled", budget_tokens: 2048 },
+          thinking: { type: "enabled", budget_tokens: 1024 },
         }),
       },
       [ChatModelProviders.AZURE_OPENAI]: {
         modelName:
           customModel.azureOpenAIApiDeploymentName || settings.azureOpenAIApiDeploymentName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.azureOpenAIApiKey),
+        openAIApiKey: await getDecryptedKey(customModel.apiKey || settings.azureOpenAIApiKey),
         configuration: {
           baseURL:
             customModel.baseUrl ||
@@ -188,11 +160,10 @@ export default class ChatModelManager {
           },
           fetch: customModel.enableCors ? safeFetch : undefined,
         },
-        ...this.getOpenAISpecialConfig(
-          modelName,
+        ...this.handleOpenAIExtraArgs(
+          isOSeries,
           customModel.maxTokens ?? settings.maxTokens,
-          customModel.temperature ?? settings.temperature,
-          customModel
+          customModel.temperature ?? settings.temperature
         ),
       },
       [ChatModelProviders.COHEREAI]: {
@@ -229,7 +200,7 @@ export default class ChatModelManager {
       },
       [ChatModelProviders.OPENROUTERAI]: {
         modelName: modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.openRouterAiApiKey),
+        openAIApiKey: await getDecryptedKey(customModel.apiKey || settings.openRouterAiApiKey),
         configuration: {
           baseURL: customModel.baseUrl || "https://openrouter.ai/api/v1",
           fetch: customModel.enableCors ? safeFetch : undefined,
@@ -254,7 +225,7 @@ export default class ChatModelManager {
       },
       [ChatModelProviders.LM_STUDIO]: {
         modelName: modelName,
-        apiKey: customModel.apiKey || "default-key",
+        openAIApiKey: customModel.apiKey || "default-key",
         configuration: {
           baseURL: customModel.baseUrl || "http://localhost:1234/v1",
           fetch: customModel.enableCors ? safeFetch : undefined,
@@ -262,22 +233,21 @@ export default class ChatModelManager {
       },
       [ChatModelProviders.OPENAI_FORMAT]: {
         modelName: modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.openAIApiKey),
+        openAIApiKey: await getDecryptedKey(customModel.apiKey || settings.openAIApiKey),
         configuration: {
           baseURL: customModel.baseUrl,
           fetch: customModel.enableCors ? safeFetch : undefined,
           defaultHeaders: { "dangerously-allow-browser": "true" },
         },
-        ...this.getOpenAISpecialConfig(
-          modelName,
+        ...this.handleOpenAIExtraArgs(
+          isOSeries,
           customModel.maxTokens ?? settings.maxTokens,
-          customModel.temperature ?? settings.temperature,
-          customModel
+          customModel.temperature ?? settings.temperature
         ),
       },
       [ChatModelProviders.COPILOT_PLUS]: {
         modelName: modelName,
-        apiKey: await getDecryptedKey(settings.plusLicenseKey),
+        openAIApiKey: await getDecryptedKey(settings.plusLicenseKey),
         configuration: {
           baseURL: BREVILABS_API_BASE_URL,
           fetch: customModel.enableCors ? safeFetch : undefined,
@@ -307,14 +277,15 @@ export default class ChatModelManager {
       customModel
     );
 
-    // LangChain 0.6.6 handles token configuration for special models internally
     const tokenConfig = isThinkingEnabled
       ? {
           maxTokens: customModel.maxTokens ?? settings.maxTokens,
         }
-      : {
-          maxTokens: customModel.maxTokens ?? settings.maxTokens,
-        };
+      : this.handleOpenAIExtraArgs(
+          isOSeries,
+          customModel.maxTokens ?? settings.maxTokens,
+          customModel.temperature ?? settings.temperature
+        );
 
     const finalConfig = {
       ...baseConfig,
@@ -323,47 +294,28 @@ export default class ChatModelManager {
       ...tokenConfig,
     };
 
+    // Final safety check to ensure no temperature when thinking is enabled
+    if (isThinkingEnabled) {
+      delete finalConfig.temperature;
+    }
+
     return finalConfig as ModelConfig;
   }
 
-  /**
-   * Adds special configuration for OpenAI models that support reasoning
-   * LangChain 0.6.6+ handles most of the token/temperature logic internally
-   */
-  private getOpenAISpecialConfig(
-    modelName: string,
+  private handleOpenAIExtraArgs(
+    isOSeriesModel: boolean,
     maxTokens: number,
-    _temperature: number | undefined,
-    customModel?: CustomModel
+    temperature: number | undefined
   ) {
-    const settings = getSettings();
-    const modelInfo = getModelInfo(modelName);
-    const resolvedTemperature = this.getTemperatureForModel(
-      modelInfo,
-      customModel || ({} as CustomModel),
-      settings
-    );
-
-    const config: any = {
-      maxTokens,
-      temperature: resolvedTemperature,
-    };
-
-    // Add reasoning parameters for O-series and GPT-5 models
-    // LangChain 0.6.6 will handle the endpoint routing and parameter conversion
-    if (modelInfo.isOSeries || modelInfo.isGPT5) {
-      config.reasoning = {
-        effort: customModel?.reasoningEffort || settings.reasoningEffort || "low",
-      };
-
-      // Add verbosity for GPT-5 models (when API supports it)
-      if (modelInfo.isGPT5) {
-        const verbosityValue = customModel?.verbosity || settings.verbosity || "medium";
-        config.verbosity = verbosityValue;
-        config.modelKwargs = { verbosity: verbosityValue };
-      }
-    }
-
+    const config = isOSeriesModel
+      ? {
+          maxCompletionTokens: maxTokens,
+          temperature: temperature === undefined ? undefined : 1,
+        }
+      : {
+          maxTokens: maxTokens,
+          temperature: temperature,
+        };
     return config;
   }
 
@@ -552,8 +504,8 @@ export default class ChatModelManager {
       const modelConfig = await this.getModelConfig(modelToTest);
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { streaming, maxTokens, maxCompletionTokens, ...pingConfig } = modelConfig;
-      // For ping, just use minimal config
-      const tokenConfig = { maxTokens: 30 };
+      const isOSeries = isOSeriesModel(modelToTest.name);
+      const tokenConfig = this.handleOpenAIExtraArgs(isOSeries, 30, modelConfig.temperature);
       const testModel = new (this.getProviderConstructor(modelToTest))({
         ...pingConfig,
         ...tokenConfig,

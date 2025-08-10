@@ -201,7 +201,7 @@ export async function findRelevantNotes({
   return sortedHits
     .map(([path, score]) => {
       const file = app.vault.getAbstractFileByPath(path);
-      if (!(file instanceof TFile) || file.extension !== "md") {
+      if (!(file instanceof TFile)) {
         return null;
       }
       return {

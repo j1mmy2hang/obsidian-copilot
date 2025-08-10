@@ -131,7 +131,6 @@ export const ProjectList = memo(
     showChatUI,
     onClose,
     inputRef,
-    onProjectClose,
   }: {
     className?: string;
     projects: ProjectConfig[];
@@ -143,7 +142,6 @@ export const ProjectList = memo(
     showChatUI: (v: boolean) => void;
     onClose: () => void;
     inputRef: React.RefObject<HTMLTextAreaElement>;
-    onProjectClose: () => void;
   }): React.ReactElement => {
     const [isOpen, setIsOpen] = useState(defaultOpen);
     const [showChatInput, setShowChatInput] = useState(false);
@@ -287,7 +285,6 @@ export const ProjectList = memo(
                         size="icon"
                         onClick={() => {
                           enableOrDisableProject(false);
-                          onProjectClose();
                         }}
                         aria-label="Close Current Project"
                       >

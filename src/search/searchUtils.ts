@@ -70,7 +70,7 @@ export function getDecodedPatterns(value: string): string[] {
 }
 
 /**
- * Get the exclusion patterns from the exclusion settings string.
+ * Get the exclusion patterns the exclusion settings string.
  * @returns An array of exclusion patterns.
  */
 function getExclusionPatterns(): string[] {
@@ -131,14 +131,12 @@ export function getMatchingPatterns(options?: {
  * @param file - The file to check.
  * @param inclusions - The inclusions patterns.
  * @param exclusions - The exclusions patterns.
- * @param isProject - Project: Only the included files need to be processed, setting vault embedding： All files not excluded need to be processed.
  * @returns True if the file should be indexed, false otherwise.
  */
 export function shouldIndexFile(
   file: TFile,
   inclusions: PatternCategory | null,
-  exclusions: PatternCategory | null,
-  isProject?: boolean
+  exclusions: PatternCategory | null
 ): boolean {
   if (exclusions && matchFilePathWithPatterns(file.path, exclusions)) {
     return false;
@@ -146,12 +144,6 @@ export function shouldIndexFile(
   if (inclusions && !matchFilePathWithPatterns(file.path, inclusions)) {
     return false;
   }
-
-  // Project: Only the included files need to be processed.
-  if (isProject && !inclusions) {
-    return false;
-  }
-
   return true;
 }
 

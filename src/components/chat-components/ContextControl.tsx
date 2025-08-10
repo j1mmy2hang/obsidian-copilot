@@ -4,7 +4,7 @@ import React from "react";
 
 import { ChainType } from "@/chainFactory";
 import { AddContextNoteModal } from "@/components/modals/AddContextNoteModal";
-import { SelectedTextContext } from "@/types/message";
+import { SelectedTextContext } from "@/sharedState";
 import { TFile } from "obsidian";
 import { ChatContextMenu } from "./ChatContextMenu";
 
@@ -20,7 +20,6 @@ interface ChatControlsProps {
   onRemoveUrl: (url: string) => void;
   selectedTextContexts?: SelectedTextContext[];
   onRemoveSelectedText?: (id: string) => void;
-  showProgressCard: () => void;
 }
 
 const ContextControl: React.FC<ChatControlsProps> = ({
@@ -35,7 +34,6 @@ const ContextControl: React.FC<ChatControlsProps> = ({
   onRemoveUrl,
   selectedTextContexts,
   onRemoveSelectedText,
-  showProgressCard,
 }) => {
   const [selectedChain] = useChainType();
 
@@ -88,7 +86,6 @@ const ContextControl: React.FC<ChatControlsProps> = ({
       onRemoveUrl={onRemoveUrl}
       selectedTextContexts={selectedTextContexts}
       onRemoveSelectedText={onRemoveSelectedText}
-      showProgressCard={showProgressCard}
     />
   );
 };

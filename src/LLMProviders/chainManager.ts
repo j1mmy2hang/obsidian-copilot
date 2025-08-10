@@ -13,13 +13,12 @@ import {
   LLMChainRunner,
   ProjectChainRunner,
   VaultQAChainRunner,
-  AutonomousAgentChainRunner,
-} from "@/LLMProviders/chainRunner/index";
+} from "@/LLMProviders/chainRunner";
 import { logError, logInfo } from "@/logger";
 import { HybridRetriever } from "@/search/hybridRetriever";
 import VectorStoreManager from "@/search/vectorStoreManager";
 import { getSettings, getSystemPrompt, subscribeToSettingsChange } from "@/settings/model";
-import { ChatMessage } from "@/types/message";
+import { ChatMessage } from "@/sharedState";
 import { findCustomModel, isOSeriesModel, isSupportedChain } from "@/utils";
 import {
   ChatPromptTemplate,
@@ -49,7 +48,13 @@ export default class ChainManager {
   public memoryManager: MemoryManager;
   public promptManager: PromptManager;
 
+  // A chat history that stores the messages sent and received
+  // Only reset when the user explicitly clicks "New Chat"
+  private chatMessages: ChatMessage[] = [];
+
   constructor(app: App, vectorStoreManager: VectorStoreManager) {
+    this.chatMessages = [];
+
     // Instantiate singletons
     this.app = app;
     this.vectorStoreManager = vectorStoreManager;
@@ -269,18 +274,12 @@ export default class ChainManager {
 
   private getChainRunner(): ChainRunner {
     const chainType = getChainType();
-    const settings = getSettings();
-
     switch (chainType) {
       case ChainType.LLM_CHAIN:
         return new LLMChainRunner(this);
       case ChainType.VAULT_QA_CHAIN:
         return new VaultQAChainRunner(this);
       case ChainType.COPILOT_PLUS_CHAIN:
-        // Use AutonomousAgentChainRunner if the setting is enabled
-        if (settings.enableAutonomousAgent) {
-          return new AutonomousAgentChainRunner(this);
-        }
         return new CopilotPlusChainRunner(this);
       case ChainType.PROJECT_CHAIN:
         return new ProjectChainRunner(this);
@@ -305,6 +304,7 @@ export default class ChainManager {
       debug?: boolean;
       ignoreSystemMessage?: boolean;
       updateLoading?: (loading: boolean) => void;
+      systemPrompt?: string;
     } = {}
   ) {
     const { debug = false, ignoreSystemMessage = false } = options;
@@ -324,10 +324,9 @@ export default class ChainManager {
       ]);
 
       // TODO: hack for o-series models, to be removed when langchainjs supports system prompt
-      // https://github.com/langchain-ai/langchain/issues/28895
       if (isOSeriesModel(chatModel)) {
         effectivePrompt = ChatPromptTemplate.fromMessages([
-          [USER_SENDER, getSystemPrompt() || ""],
+          [USER_SENDER, options.systemPrompt || getSystemPrompt() || ""],
           effectivePrompt,
         ]);
       }
@@ -339,13 +338,10 @@ export default class ChainManager {
     }
 
     const chainRunner = this.getChainRunner();
-    return await chainRunner.run(
-      userMessage,
-      abortController,
-      updateCurrentAiMessage,
-      addMessage,
-      options
-    );
+    return await chainRunner.run(userMessage, abortController, updateCurrentAiMessage, addMessage, {
+      ...options,
+      systemPrompt: options.systemPrompt || getSystemPrompt(),
+    });
   }
 
   async updateMemoryWithLoadedMessages(messages: ChatMessage[]) {
@@ -359,5 +355,21 @@ export default class ChainManager {
           .saveContext({ input: userMsg.message }, { output: aiMsg.message });
       }
     }
+  }
+
+  public clearHistory() {
+    this.chatMessages = [];
+  }
+
+  public getChatMessages(): ChatMessage[] {
+    return this.chatMessages;
+  }
+
+  public setChatMessages(messages: ChatMessage[]) {
+    this.chatMessages = [...messages];
+  }
+
+  public addChatMessage(message: ChatMessage) {
+    this.chatMessages.push(message);
   }
 }

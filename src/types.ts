@@ -15,5 +15,3 @@ export enum PromptSortStrategy {
   ALPHABETICAL = "alphabetical",
   MANUAL = "manual",
 }
-
-export type ApplyViewResult = "accepted" | "rejected" | "aborted" | "failed";

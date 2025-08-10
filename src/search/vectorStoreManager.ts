@@ -63,8 +63,7 @@ export default class VectorStoreManager {
       let retries = 3;
       while (retries > 0) {
         try {
-          const embeddingAPI = await this.embeddingsManager.getEmbeddingsAPI();
-          await this.dbOps.initializeDB(embeddingAPI);
+          await this.dbOps.initializeDB(await this.embeddingsManager.getEmbeddingsAPI());
           break;
         } catch (error) {
           if (
@@ -120,7 +119,7 @@ export default class VectorStoreManager {
 
   public async isIndexEmpty(): Promise<boolean> {
     await this.waitForInitialization();
-    return await this.dbOps.isIndexEmpty();
+    return this.dbOps.isIndexEmpty();
   }
 
   public async hasIndex(notePath: string): Promise<boolean> {

@@ -3,6 +3,7 @@ import Chat from "@/components/Chat";
 import { CHAT_VIEWTYPE } from "@/constants";
 import { AppContext, EventTargetContext } from "@/context";
 import CopilotPlugin from "@/main";
+import SharedState from "@/sharedState";
 import { FileParserManager } from "@/tools/FileParserManager";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { ItemView, WorkspaceLeaf } from "obsidian";
@@ -17,6 +18,7 @@ export default class CopilotView extends ItemView {
   private fileParserManager: FileParserManager;
   private root: Root | null = null;
   private handleSaveAsNote: (() => Promise<void>) | null = null;
+  sharedState: SharedState;
   eventTarget: EventTarget;
 
   constructor(
@@ -24,6 +26,7 @@ export default class CopilotView extends ItemView {
     private plugin: CopilotPlugin
   ) {
     super(leaf);
+    this.sharedState = plugin.sharedState;
     this.app = plugin.app;
     this.fileParserManager = plugin.fileParserManager;
     this.eventTarget = new EventTarget();
@@ -72,12 +75,12 @@ export default class CopilotView extends ItemView {
           <React.StrictMode>
             <Tooltip.Provider delayDuration={0}>
               <Chat
+                sharedState={this.sharedState}
                 chainManager={this.chainManager}
                 updateUserMessageHistory={updateUserMessageHistory}
                 fileParserManager={this.fileParserManager}
                 plugin={this.plugin}
                 onSaveChat={handleSaveAsNote}
-                chatUIState={this.plugin.chatUIState}
               />
             </Tooltip.Provider>
           </React.StrictMode>
@@ -93,8 +96,11 @@ export default class CopilotView extends ItemView {
   }
 
   updateView(): void {
-    // Note: The new architecture handles message loading through ChatManager
-    // The messages will be loaded when the Chat component initializes
+    // load currentChainManager chatMessages
+    this.sharedState.replaceMessages(
+      this.plugin.projectManager.getCurrentChainManager().getChatMessages()
+    );
+
     const handleSaveAsNote = (saveFunction: () => Promise<void>) => {
       this.handleSaveAsNote = saveFunction;
     };

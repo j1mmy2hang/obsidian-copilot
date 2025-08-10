@@ -1,5 +1,4 @@
 import {
-  FailedItem,
   getChainType,
   isProjectMode,
   ProjectConfig,
@@ -10,6 +9,7 @@ import {
 } from "@/aiParams";
 import { ContextCache, ProjectContextCache } from "@/cache/projectContextCache";
 import { ChainType } from "@/chainFactory";
+import { updateChatMemory } from "@/chatUtils";
 import CopilotView from "@/components/CopilotView";
 import { CHAT_VIEWTYPE, VAULT_VECTOR_STORE_STRATEGY } from "@/constants";
 import { logError, logInfo, logWarn } from "@/logger";
@@ -17,14 +17,13 @@ import CopilotPlugin from "@/main";
 import { Mention } from "@/mentions/Mention";
 import { getMatchingPatterns, shouldIndexFile } from "@/search/searchUtils";
 import { getSettings, subscribeToSettingsChange } from "@/settings/model";
+import { ChatMessage } from "@/sharedState";
 import { FileParserManager } from "@/tools/FileParserManager";
 import { err2String } from "@/utils";
-import { isRateLimitError } from "@/utils/rateLimitUtils";
 import { App, Notice, TFile } from "obsidian";
 import VectorStoreManager from "../search/vectorStoreManager";
 import { BrevilabsClient } from "./brevilabsClient";
 import ChainManager from "./chainManager";
-import { ProjectLoadTracker } from "./projectLoadTracker";
 
 export default class ProjectManager {
   public static instance: ProjectManager;
@@ -33,8 +32,9 @@ export default class ProjectManager {
   private plugin: CopilotPlugin;
   private readonly chainMangerInstance: ChainManager;
   private readonly projectContextCache: ProjectContextCache;
+  private chatMessageCache: Map<string, ChatMessage[]>;
+  private defaultProjectKey: string = "defaultProjectKey";
   private fileParserManager: FileParserManager;
-  private loadTracker: ProjectLoadTracker;
 
   private constructor(app: App, vectorStoreManager: VectorStoreManager, plugin: CopilotPlugin) {
     this.app = app;
@@ -42,13 +42,13 @@ export default class ProjectManager {
     this.currentProjectId = null;
     this.chainMangerInstance = new ChainManager(app, vectorStoreManager);
     this.projectContextCache = ProjectContextCache.getInstance();
+    this.chatMessageCache = new Map();
     this.fileParserManager = new FileParserManager(
       BrevilabsClient.getInstance(),
       this.app.vault,
       true,
       null
     );
-    this.loadTracker = ProjectLoadTracker.getInstance(this.app);
 
     // Set up subscriptions
     subscribeToModelKeyChange(async () => {
@@ -122,14 +122,8 @@ export default class ProjectManager {
     return this.chainMangerInstance;
   }
 
-  public getCurrentProjectId(): string | null {
-    return this.currentProjectId;
-  }
-
   public async switchProject(project: ProjectConfig | null): Promise<void> {
     try {
-      // Clear all project context loading states
-      this.loadTracker.clearAllLoadStates();
       setProjectLoading(true);
       logInfo("Project loading started...");
 
@@ -180,23 +174,29 @@ export default class ProjectManager {
   }
 
   private async saveCurrentProjectMessage() {
-    // The new ChatManager handles message persistence internally
-    // during project switches, so we just need to trigger autosave
+    // save show message
+    this.chatMessageCache.set(
+      this.currentProjectId ? this.currentProjectId : this.defaultProjectKey,
+      this.getCurrentChainManager().getChatMessages()
+    );
+
+    // TODO(emt-lin): do this or not?
     await this.plugin.autosaveCurrentChat();
   }
 
   private async loadNextProjectMessage() {
-    // Notify ChatUIState about the project switch
-    // This will trigger ChatManager to switch to the correct message repository
-    // and update the UI with the appropriate messages
-    await this.plugin.chatUIState.handleProjectSwitch();
+    const chainManager = this.getCurrentChainManager();
+
+    const messages =
+      this.chatMessageCache.get(
+        this.currentProjectId ? this.currentProjectId : this.defaultProjectKey
+      ) ?? [];
+
+    chainManager.setChatMessages(messages);
+    await updateChatMemory(messages, chainManager.memoryManager);
   }
 
   private async loadProjectContext(project: ProjectConfig): Promise<ContextCache | null> {
-    // for update context condition
-    this.loadTracker.clearAllLoadStates();
-    setProjectLoading(true);
-
     try {
       if (!project.contextSource) {
         logWarn(`[loadProjectContext] Project ${project.name}: No contextSource. Aborting.`);
@@ -204,31 +204,81 @@ export default class ProjectManager {
       }
       logInfo(`[loadProjectContext] Starting for project: ${project.name}`);
 
-      logInfo(
-        `[loadProjectContext] Project ${project.name}: Cleared all project context load states`
-      );
-
-      const contextCache = await this.projectContextCache.getOrInitializeCache(project);
-
-      const projectAllFiles = this.getProjectAllFiles(project);
-
-      // Pre-count all items that need to be processed
-      this.loadTracker.preComputeAllItems(project, projectAllFiles);
-      this.loadTracker.markAllCachedItemsAsSuccess(project, contextCache, projectAllFiles);
+      const initialProjectCache = await this.projectContextCache.get(project);
+      const contextCache = initialProjectCache || {
+        markdownContext: "",
+        webContexts: {},
+        youtubeContexts: {},
+        fileContexts: {},
+        timestamp: Date.now(),
+        markdownNeedsReload: true,
+      };
+      if (!initialProjectCache) {
+        logInfo(
+          `[loadProjectContext] Project ${project.name}: No existing cache found, building fresh context.`
+        );
+      } else {
+        logInfo(
+          `[loadProjectContext] Project ${project.name}: Existing cache found. MarkdownNeedsReload: ${contextCache.markdownNeedsReload}`
+        );
+      }
 
       const [updatedContextCacheAfterSources] = await Promise.all([
-        this.processMarkdownFiles(project, contextCache, projectAllFiles),
+        this.processMarkdownFiles(project, contextCache),
         this.processWebUrls(project, contextCache),
         this.processYoutubeUrls(project, contextCache),
       ]);
 
-      updatedContextCacheAfterSources.timestamp = Date.now();
-      // Note: Since non-markdown files cannot pass cache parameters , so we need to save the context cache first
-      await this.projectContextCache.setCacheSafely(project, updatedContextCacheAfterSources);
-
       // After other contexts are processed, ensure all referenced non-markdown files are parsed and cached
-      await this.processNonMarkdownFiles(project, projectAllFiles);
+      if (updatedContextCacheAfterSources.fileContexts) {
+        const fileContextCount = Object.keys(updatedContextCacheAfterSources.fileContexts).length;
+        logInfo(
+          `[loadProjectContext] Project ${project.name}: Checking ${fileContextCount} fileContexts for non-markdown processing.`
+        );
 
+        if (fileContextCount > 0) {
+          this.fileParserManager = new FileParserManager(
+            BrevilabsClient.getInstance(),
+            this.app.vault,
+            true,
+            project
+          );
+          let processedNonMdCount = 0;
+          for (const filePath in updatedContextCacheAfterSources.fileContexts) {
+            const file = this.app.vault.getAbstractFileByPath(filePath);
+            if (file instanceof TFile && file.extension !== "md") {
+              if (this.fileParserManager.supportsExtension(file.extension)) {
+                try {
+                  const existingContent = await this.projectContextCache.getFileContext(
+                    project,
+                    filePath
+                  );
+                  if (!existingContent) {
+                    logInfo(
+                      `[loadProjectContext] Project ${project.name}: Parsing/caching new/updated file: ${filePath}`
+                    );
+                    await this.fileParserManager.parseFile(file, this.app.vault);
+                    processedNonMdCount++;
+                  } // else { logInfo for skipped can be too verbose }
+                } catch (error) {
+                  logError(
+                    `[loadProjectContext] Project ${project.name}: Error parsing file ${filePath}:`,
+                    error
+                  );
+                }
+              }
+            }
+          }
+          if (processedNonMdCount > 0) {
+            logInfo(
+              `[loadProjectContext] Project ${project.name}: Processed and cached ${processedNonMdCount} non-markdown files.`
+            );
+          }
+        }
+      }
+
+      updatedContextCacheAfterSources.timestamp = Date.now();
+      await this.projectContextCache.set(project, updatedContextCacheAfterSources);
       logInfo(`[loadProjectContext] Completed for project: ${project.name}.`);
       return updatedContextCacheAfterSources;
     } catch (error) {
@@ -270,10 +320,11 @@ export default class ProjectManager {
         const nextUrls = nextWebUrls.split("\n").filter((url) => url.trim());
 
         // Remove context for URLs that no longer exist
-        await this.projectContextCache.removeWebUrls(
-          nextProject,
-          prevUrls.filter((url) => !nextUrls.includes(url))
-        );
+        for (const url of prevUrls) {
+          if (!nextUrls.includes(url)) {
+            await this.projectContextCache.removeWebUrl(nextProject, url);
+          }
+        }
       }
 
       // Check if YouTube URLs configuration has changed
@@ -286,10 +337,11 @@ export default class ProjectManager {
         const nextUrls = nextYoutubeUrls.split("\n").filter((url) => url.trim());
 
         // Remove context for URLs that no longer exist
-        await this.projectContextCache.removeYoutubeUrls(
-          nextProject,
-          prevUrls.filter((url) => !nextUrls.includes(url))
-        );
+        for (const url of prevUrls) {
+          if (!nextUrls.includes(url)) {
+            await this.projectContextCache.removeYoutubeUrl(nextProject, url);
+          }
+        }
       }
     } catch (error) {
       logError(`Error comparing project configurations: ${error}`);
@@ -324,7 +376,6 @@ export default class ProjectManager {
           `[getProjectContext] Project ${project.name}: Markdown needs reload. Triggering full load.`
         );
       }
-
       const updatedCache = await this.loadProjectContext(project);
       if (!updatedCache) {
         logError(`[getProjectContext] Project ${project.name}: loadProjectContext returned null.`);
@@ -377,7 +428,7 @@ export default class ProjectManager {
 
           // Retrieve file content from FileCache
           const content =
-            (await this.projectContextCache.getOrReuseFileContext(project, filePath)) ||
+            (await this.projectContextCache.getFileContext(project, filePath)) ||
             "[Content not available]"; // This is expected for files not processed into FileCache
 
           return `[[${fileName}]]\npath: ${filePath}\ntype: ${fileType}\nmodified: ${new Date(fileContext.timestamp).toISOString()}\n\n${content}`;
@@ -450,50 +501,80 @@ ${contextParts.join("\n\n")}
 
   private async processMarkdownFiles(
     project: ProjectConfig,
-    contextCache: ContextCache,
-    projectAllFiles: TFile[]
+    contextCache: ContextCache
   ): Promise<ContextCache> {
     logInfo(`[processMarkdownFiles] Starting for project: ${project.name}`);
+    const initialFileContextsCount = Object.keys(contextCache.fileContexts || {}).length;
 
-    if (
-      contextCache.markdownNeedsReload ||
-      !contextCache.markdownContext ||
-      !contextCache.markdownContext.trim()
-    ) {
-      logInfo(`[processMarkdownFiles] Project ${project.name}: Processing markdown content.`);
-      const markdownContent = await this.processMarkdownFileContext(projectAllFiles);
-
-      // add context reference to markdown file
-      this.projectContextCache.updateProjectMarkdownFilesFromPatterns(
+    if (project.contextSource?.inclusions || project.contextSource?.exclusions) {
+      contextCache = await this.projectContextCache.updateProjectFilesFromPatterns(
         project,
-        contextCache,
-        projectAllFiles
+        contextCache
       );
+      const newFileContextsCount = Object.keys(contextCache.fileContexts || {}).length;
+      if (newFileContextsCount > initialFileContextsCount) {
+        logInfo(
+          `[processMarkdownFiles] Project ${project.name}: Added ${newFileContextsCount - initialFileContextsCount} new file references via updateProjectFilesFromPatterns.`
+        );
+      }
 
-      contextCache.markdownContext = markdownContent;
-      contextCache.markdownNeedsReload = false;
-
-      logInfo(`[processMarkdownFiles] Project ${project.name}: Markdown content updated.`);
-    } else {
-      logInfo(
-        `[processMarkdownFiles] Project ${project.name}: Markdown content already up-to-date.`
-      );
+      if (
+        contextCache.markdownNeedsReload ||
+        !contextCache.markdownContext ||
+        !contextCache.markdownContext.trim()
+      ) {
+        logInfo(`[processMarkdownFiles] Project ${project.name}: Processing markdown content.`);
+        const markdownContent = await this.processFileContext(
+          project.contextSource.inclusions,
+          project.contextSource.exclusions,
+          project
+        );
+        contextCache.markdownContext = markdownContent;
+        contextCache.markdownNeedsReload = false;
+        logInfo(`[processMarkdownFiles] Project ${project.name}: Markdown content updated.`);
+      } else {
+        logInfo(
+          `[processMarkdownFiles] Project ${project.name}: Markdown content already up-to-date.`
+        );
+      }
     }
-
     logInfo(
       `[processMarkdownFiles] Completed for project: ${project.name}. Total fileContexts: ${Object.keys(contextCache.fileContexts || {}).length}`
     );
     return contextCache;
   }
 
-  private async processMarkdownFileContext(projectAllFiles: TFile[]): Promise<string> {
+  private async processFileContext(
+    inclusions?: string,
+    exclusions?: string,
+    project?: ProjectConfig
+  ): Promise<string> {
+    if (!inclusions && !exclusions) {
+      return "";
+    }
+
+    if (!project) {
+      return "";
+    }
+
+    // NOTE: Must not fallback to GLOBAL inclusions and exclusions in Copilot settings in Projects!
+    // This is to avoid project inclusions in the project that conflict with the global ones
+    // Project UI should be the ONLY source of truth for project inclusions and exclusions
+    const { inclusions: inclusionPatterns, exclusions: exclusionPatterns } = getMatchingPatterns({
+      inclusions,
+      exclusions,
+      isProject: true,
+    });
+
     // FileParserManager will be used to process these files when they're accessed,
     // either immediately or on-demand when the context is formatted
 
     // Get all markdown files that match the inclusion/exclusion patterns
     // Note: We're only processing markdown files here, other file types
     // are handled by FileParserManager and stored in the file cache
-    const files = projectAllFiles.filter((file) => file.extension === "md");
+    const files = this.app.vault.getFiles().filter((file) => {
+      return file.extension === "md" && shouldIndexFile(file, inclusionPatterns, exclusionPatterns);
+    });
 
     logInfo(`Found ${files.length} markdown files to process for project context`);
 
@@ -504,25 +585,15 @@ ${contextParts.join("\n\n")}
         let metadata = "";
 
         try {
-          // Only process markdown files here
-          const [stat, fileContent] = await this.loadTracker.executeWithProcessTracking(
-            file.path,
-            "md",
-            async () => {
-              return Promise.all([
-                this.app.vault.adapter.stat(file.path),
-                this.app.vault.read(file),
-              ]);
-            }
-          );
-
+          const stat = await this.app.vault.adapter.stat(file.path);
           metadata = `[[${file.basename}]]
 path: ${file.path}
 type: ${file.extension}
 created: ${stat ? new Date(stat.ctime).toISOString() : "unknown"}
 modified: ${stat ? new Date(stat.mtime).toISOString() : "unknown"}`;
 
-          content = fileContent;
+          // Only process markdown files here
+          content = await this.app.vault.read(file);
           logInfo(`Completed processing markdown file: ${file.path}`);
         } catch (error) {
           logError(`Error processing file ${file.path}: ${error}`);
@@ -581,8 +652,8 @@ modified: ${stat ? new Date(stat.mtime).toISOString() : "unknown"}`;
     }
 
     const webContextPromises = urlsToFetch.map(async (url) => {
-      // processWebUrlContext itself should log errors if a specific URL fetch fails.
-      const webContext = await this.processWebUrlContext(url);
+      // processWebUrlsContext itself should log errors if a specific URL fetch fails.
+      const webContext = await this.processWebUrlsContext(url);
       if (webContext) {
         logInfo(
           `[processWebUrls] Project ${project.name}: Successfully fetched content for URL: ${url.substring(0, 50)}...`
@@ -648,7 +719,7 @@ modified: ${stat ? new Date(stat.mtime).toISOString() : "unknown"}`;
     }
 
     const youtubeContextPromises = urlsToFetch.map(async (url) => {
-      const youtubeContext = await this.processYoutubeUrlContext(url);
+      const youtubeContext = await this.processYoutubeUrlsContext(url);
       if (youtubeContext) {
         logInfo(
           `[processYoutubeUrls] Project ${project.name}: Successfully fetched transcript for YouTube URL: ${url.substring(0, 50)}...`
@@ -673,252 +744,44 @@ modified: ${stat ? new Date(stat.mtime).toISOString() : "unknown"}`;
     return contextCache;
   }
 
-  private async processWebUrlContext(webUrl?: string): Promise<string> {
-    if (!webUrl?.trim()) {
+  private async processWebUrlsContext(webUrls?: string): Promise<string> {
+    if (!webUrls?.trim()) {
       return "";
     }
 
     try {
       const mention = Mention.getInstance();
-      const { urlContext } = await this.loadTracker.executeWithProcessTracking(
-        webUrl,
-        "web",
-        async () => {
-          const result = await mention.processUrls(webUrl);
-
-          if (result.processedErrorUrls[webUrl]) {
-            throw new Error(result.processedErrorUrls[webUrl]);
-          }
-          return result;
-        }
-      );
+      const { urlContext } = await mention.processUrls(webUrls);
       return urlContext || "";
     } catch (error) {
-      logError(`Failed to process web URL: ${error}`);
+      logError(`Failed to process web URLs: ${error}`);
+      new Notice(`Failed to process web URLs: ${err2String(error)}`);
       return "";
     }
   }
 
-  private async processYoutubeUrlContext(youtubeUrl?: string): Promise<string> {
-    if (!youtubeUrl?.trim()) {
+  private async processYoutubeUrlsContext(youtubeUrls?: string): Promise<string> {
+    if (!youtubeUrls?.trim()) {
       return "";
     }
 
-    try {
-      const response = await this.loadTracker.executeWithProcessTracking(
-        youtubeUrl,
-        "youtube",
-        async () => {
-          return BrevilabsClient.getInstance().youtube4llm(youtubeUrl);
+    const urls = youtubeUrls.split("\n").filter((url) => url.trim());
+    const processPromises = urls.map(async (url) => {
+      try {
+        const response = await BrevilabsClient.getInstance().youtube4llm(url);
+        if (response.response.transcript) {
+          return `\n\nYouTube transcript from ${url}:\n${response.response.transcript}`;
         }
-      );
-      if (response.response.transcript) {
-        return `\n\nYouTube transcript from ${youtubeUrl}:\n${response.response.transcript}`;
+        return "";
+      } catch (error) {
+        logError(`Failed to process YouTube URL ${url}: ${error}`);
+        new Notice(`Failed to process YouTube URL ${url}: ${err2String(error)}`);
+        return "";
       }
-      return "";
-    } catch (error) {
-      logError(`Failed to process YouTube URL ${youtubeUrl}: ${error}`);
-      new Notice(`Failed to process YouTube URL ${youtubeUrl}: ${err2String(error)}`);
-      return "";
-    }
-  }
-
-  private async processNonMarkdownFiles(
-    project: ProjectConfig,
-    projectAllFiles: TFile[]
-  ): Promise<void> {
-    const nonMarkdownFiles = projectAllFiles.filter((file) => file.extension !== "md");
-
-    logInfo(
-      `[loadProjectContext] Project ${project.name}: Checking for non-markdown processing: ${nonMarkdownFiles.length} files .`
-    );
-
-    if (nonMarkdownFiles.length <= 0) {
-      return;
-    }
-
-    this.fileParserManager = new FileParserManager(
-      BrevilabsClient.getInstance(),
-      this.app.vault,
-      true,
-      project
-    );
-
-    let processedNonMdCount = 0;
-
-    for (const file of nonMarkdownFiles) {
-      const filePath = file.path;
-      if (this.fileParserManager.supportsExtension(file.extension)) {
-        try {
-          await this.loadTracker.executeWithProcessTracking(filePath, "nonMd", async () => {
-            const existingContent = await this.projectContextCache.getOrReuseFileContext(
-              project,
-              filePath
-            );
-            if (existingContent) {
-              processedNonMdCount++;
-            } else {
-              logInfo(
-                `[loadProjectContext] Project ${project.name}: Parsing/caching new/updated file: ${filePath}`
-              );
-
-              await this.fileParserManager.parseFile(file, this.app.vault);
-              processedNonMdCount++;
-            }
-          });
-        } catch (error) {
-          logError(
-            `[loadProjectContext] Project ${project.name}: Error parsing file ${filePath}:`,
-            error
-          );
-
-          // Check if this is a rate limit error and re-throw it to fail the entire operation
-          if (isRateLimitError(error)) {
-            throw error; // Re-throw to fail the entire operation
-          }
-        }
-      }
-    }
-
-    if (processedNonMdCount > 0) {
-      logInfo(
-        `[loadProjectContext] Project ${project.name}: Processed and cached ${processedNonMdCount} non-markdown files.`
-      );
-    }
-  }
-
-  /**
-   * Retry failed item
-   * @param failedItem Failed item information
-   */
-  public async retryFailedItem(failedItem: FailedItem): Promise<void> {
-    try {
-      if (!this.currentProjectId) {
-        logWarn("[retryFailedItem] No current project, aborting retry");
-        return;
-      }
-
-      const project = getSettings().projectList.find((p) => p.id === this.currentProjectId);
-      if (!project) {
-        logError(`[retryFailedItem] Current project not found: ${this.currentProjectId}`);
-        return;
-      }
-
-      logInfo(`[retryFailedItem] Starting retry for ${failedItem.type} item: ${failedItem.path}`);
-
-      // Handle different retry types
-      switch (failedItem.type) {
-        case "web":
-          await this.retryWebUrl(project, failedItem.path);
-          break;
-        case "youtube":
-          await this.retryYoutubeUrl(project, failedItem.path);
-          break;
-        case "md":
-          await this.retryMarkdownFile(project, failedItem.path);
-          break;
-        case "nonMd":
-          await this.retryNonMarkdownFile(project, failedItem.path);
-          break;
-        default:
-          logWarn(`[retryFailedItem] Unknown item type: ${failedItem.type}`);
-          return;
-      }
-
-      logInfo(`[retryFailedItem] Successfully retried ${failedItem.type} item: ${failedItem.path}`);
-      new Notice(`Retry successful: ${failedItem.path}`);
-    } catch (error) {
-      logError(
-        `[retryFailedItem] Failed to retry ${failedItem.type} item ${failedItem.path}:`,
-        error
-      );
-      new Notice(`Retry failed: ${err2String(error)}`);
-    }
-  }
-
-  private async retryWebUrl(project: ProjectConfig, url: string): Promise<void> {
-    const webContext = await this.processWebUrlContext(url);
-    if (!webContext) {
-      logWarn(`[retryWebUrl] Project ${project.name}: Fetched empty content for Web URL: ${url}`);
-      return;
-    }
-
-    logInfo(
-      `[retryWebUrl] Project ${project.name}: Successfully fetched content for URL: ${url.substring(0, 50)}...`
-    );
-    await this.projectContextCache.updateWebUrl(project, url, webContext);
-  }
-
-  private async retryYoutubeUrl(project: ProjectConfig, url: string): Promise<void> {
-    const youtubeContext = await this.processYoutubeUrlContext(url);
-    if (!youtubeContext) {
-      logWarn(
-        `[retryYoutubeUrl] Project ${project.name}: Fetched empty transcript for YouTube URL: ${url}`
-      );
-      return;
-    }
-
-    logInfo(
-      `[retryYoutubeUrl] Project ${project.name}: Successfully fetched transcript for YouTube URL: ${url.substring(0, 50)}...`
-    );
-    await this.projectContextCache.updateYoutubeUrl(project, url, youtubeContext);
-  }
-
-  private async retryMarkdownFile(project: ProjectConfig, filePath: string): Promise<void> {
-    const file = this.app.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof TFile) || file.extension !== "md") {
-      throw new Error(`File not found or not a markdown file: ${filePath}`);
-    }
-
-    try {
-      // add flag to track reprocessing of Markdown
-      await this.loadTracker.executeWithProcessTracking(file.path, "md", async () => {});
-
-      logInfo(`[retryMarkdownFile] Successfully reprocessed markdown file: ${filePath}`);
-
-      // flag the markdown context as needing a reload
-      await this.projectContextCache.invalidateMarkdownContext(project);
-    } catch (error) {
-      logError(`[retryMarkdownFile] Error processing file ${filePath}: ${error}`);
-      throw error;
-    }
-  }
-
-  private async retryNonMarkdownFile(project: ProjectConfig, filePath: string): Promise<void> {
-    const file = this.app.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof TFile) || file.extension === "md") {
-      throw new Error(`File not found or is a markdown file: ${filePath}`);
-    }
-
-    if (!this.fileParserManager.supportsExtension(file.extension)) {
-      throw new Error(`Unsupported file extension: ${file.extension}`);
-    }
-
-    try {
-      await this.loadTracker.executeWithProcessTracking(filePath, "nonMd", async () => {
-        return this.fileParserManager.parseFile(file, this.app.vault);
-      });
-
-      logInfo(`[retryNonMarkdownFile] Successfully reprocessed non-markdown file: ${filePath}`);
-    } catch (error) {
-      logError(`[retryNonMarkdownFile] Error processing file ${filePath}: ${error}`);
-      throw error;
-    }
-  }
-
-  private getProjectAllFiles(project: ProjectConfig) {
-    // NOTE: Must not fallback to GLOBAL inclusions and exclusions in Copilot settings in Projects!
-    // This is to avoid project inclusions in the project that conflict with the global ones
-    // Project UI should be the ONLY source of truth for project inclusions and exclusions
-    const { inclusions: inclusionPatterns, exclusions: exclusionPatterns } = getMatchingPatterns({
-      inclusions: project.contextSource.inclusions,
-      exclusions: project.contextSource.exclusions,
-      isProject: true,
     });
 
-    return this.app.vault.getFiles().filter((file: TFile) => {
-      return shouldIndexFile(file, inclusionPatterns, exclusionPatterns, true);
-    });
+    const results = await Promise.all(processPromises);
+    return results.join("");
   }
 
   public onunload(): void {

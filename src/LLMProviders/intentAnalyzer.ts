@@ -1,20 +1,19 @@
-import ProjectManager from "@/LLMProviders/projectManager";
-import { isProjectMode } from "@/aiParams";
-import { createGetFileTreeTool } from "@/tools/FileTreeTools";
 import { indexTool, localSearchTool, webSearchTool } from "@/tools/SearchTools";
 import {
-  convertTimeBetweenTimezonesTool,
   getCurrentTimeTool,
   getTimeInfoByEpochTool,
   getTimeRangeMsTool,
   pomodoroTool,
   TimeInfo,
 } from "@/tools/TimeTools";
+import { createGetFileTreeTool } from "@/tools/FileTreeTools";
 import { simpleYoutubeTranscriptionTool } from "@/tools/YoutubeTools";
 import { ToolManager } from "@/tools/toolManager";
-import { extractAllYoutubeUrls, extractChatHistory } from "@/utils";
-import { Vault } from "obsidian";
+import { extractChatHistory, extractYoutubeUrl } from "@/utils";
 import { BrevilabsClient } from "./brevilabsClient";
+import { Vault } from "obsidian";
+import ProjectManager from "@/LLMProviders/projectManager";
+import { isProjectMode } from "@/aiParams";
 
 // TODO: Add @index with explicit pdf files in chat context menu
 export const COPILOT_TOOL_NAMES = ["@vault", "@composer", "@websearch", "@youtube", "@pomodoro"];
@@ -31,7 +30,6 @@ export class IntentAnalyzer {
     if (this.tools.length === 0) {
       this.tools = [
         getCurrentTimeTool,
-        convertTimeBetweenTimezonesTool,
         getTimeInfoByEpochTool,
         getTimeRangeMsTool,
         localSearchTool,
@@ -106,7 +104,7 @@ export class IntentAnalyzer {
     const { timeRange, salientTerms } = context;
 
     // Handle @vault command
-    if (message.includes("@vault")) {
+    if (message.includes("@vault") && (salientTerms.length > 0 || timeRange)) {
       // Remove all @commands from the query
       const cleanQuery = this.removeAtCommands(originalMessage);
 
@@ -146,18 +144,15 @@ export class IntentAnalyzer {
       });
     }
 
-    // Auto-detect YouTube URLs (handles both @youtube command and auto-detection)
-    const youtubeUrls = extractAllYoutubeUrls(originalMessage);
-    for (const url of youtubeUrls) {
-      // Check if we already have a YouTube tool call for this URL
-      const hasYoutubeToolForUrl = processedToolCalls.some(
-        (tc) => tc.tool.name === simpleYoutubeTranscriptionTool.name && tc.args.url === url
-      );
-
-      if (!hasYoutubeToolForUrl) {
+    // Handle @youtube command
+    if (message.includes("@youtube")) {
+      const youtubeUrl = extractYoutubeUrl(originalMessage);
+      if (youtubeUrl) {
         processedToolCalls.push({
           tool: simpleYoutubeTranscriptionTool,
-          args: { url },
+          args: {
+            url: youtubeUrl,
+          },
         });
       }
     }

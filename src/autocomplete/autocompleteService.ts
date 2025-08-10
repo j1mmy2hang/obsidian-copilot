@@ -22,21 +22,17 @@ export class AutocompleteService {
 
     // Subscribe to settings changes
     this.unsubscribeSettings = subscribeToSettingsChange((prev, next) => {
-      // Handle changes to autocomplete settings AND Plus user status
-      const prevActive =
-        (prev.enableAutocomplete || prev.enableWordCompletion) && prev.isPlusUser === true;
-      const nextActive =
-        (next.enableAutocomplete || next.enableWordCompletion) && next.isPlusUser === true;
+      // Handle changes to either autocomplete setting
+      const prevActive = prev.enableAutocomplete || prev.enableWordCompletion;
+      const nextActive = next.enableAutocomplete || next.enableWordCompletion;
 
       if (prevActive !== nextActive) {
         this.cmIntegration.setActive(nextActive);
       }
     });
 
-    // Set initial active state - active only if completion is enabled AND user is Plus
-    const initialActive =
-      (settings.enableAutocomplete || settings.enableWordCompletion) &&
-      settings.isPlusUser === true;
+    // Set initial active state - active if EITHER completion type is enabled
+    const initialActive = settings.enableAutocomplete || settings.enableWordCompletion;
     this.cmIntegration.setActive(initialActive);
 
     // Register the extension globally

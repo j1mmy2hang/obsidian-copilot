@@ -1,8 +1,7 @@
 import { AI_SENDER, USER_SENDER } from "@/constants";
-import { ChatMessage } from "@/types/message";
+import { ChatMessage } from "@/sharedState";
 import { stringToFormattedDateTime } from "@/utils";
 import MemoryManager from "./LLMProviders/memoryManager";
-import { v4 as uuidv4 } from "uuid";
 
 export function parseChatContent(content: string): ChatMessage[] {
   const lines = content.split("\n");
@@ -15,7 +14,6 @@ export function parseChatContent(content: string): ChatMessage[] {
     if (line.startsWith("**user**:") || line.startsWith("**ai**:")) {
       if (currentSender && currentMessage) {
         messages.push({
-          id: uuidv4(),
           sender: currentSender === USER_SENDER ? USER_SENDER : AI_SENDER,
           message: currentMessage.trim(),
           isVisible: true,
@@ -34,7 +32,6 @@ export function parseChatContent(content: string): ChatMessage[] {
 
   if (currentSender && currentMessage) {
     messages.push({
-      id: uuidv4(),
       sender: currentSender === USER_SENDER ? USER_SENDER : AI_SENDER,
       message: currentMessage.trim(),
       isVisible: true,

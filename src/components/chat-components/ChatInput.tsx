@@ -1,42 +1,42 @@
 import {
-  getCurrentProject,
   ProjectConfig,
+  getCurrentProject,
   subscribeToProjectChange,
   useChainType,
   useModelKey,
   useProjectLoading,
 } from "@/aiParams";
 import { ChainType } from "@/chainFactory";
-import { CustomCommandManager } from "@/commands/customCommandManager";
-import { sortSlashCommands } from "@/commands/customCommandUtils";
-import { getCachedCustomCommands } from "@/commands/state";
 import { AddContextNoteModal } from "@/components/modals/AddContextNoteModal";
 import { AddImageModal } from "@/components/modals/AddImageModal";
 import { ListPromptModal } from "@/components/modals/ListPromptModal";
 import { Button } from "@/components/ui/button";
-import { ModelSelector } from "@/components/ui/ModelSelector";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { ModelDisplay } from "@/components/ui/model-display";
 import { ContextProcessor } from "@/contextProcessor";
-import { cn } from "@/lib/utils";
+import { CustomCommandManager } from "@/commands/customCommandManager";
 import { COPILOT_TOOL_NAMES } from "@/LLMProviders/intentAnalyzer";
 import { Mention } from "@/mentions/Mention";
-
-import { updateSetting, useSettingsValue } from "@/settings/model";
-import { SelectedTextContext } from "@/types/message";
+import { getModelKeyFromModel, useSettingsValue } from "@/settings/model";
+import { SelectedTextContext } from "@/sharedState";
 import { getToolDescription } from "@/tools/toolManager";
-import { extractNoteFiles, isAllowedFileForContext, isNoteTitleUnique } from "@/utils";
+import { checkModelApiKey, err2String, extractNoteFiles, isNoteTitleUnique } from "@/utils";
 import {
+  ArrowBigUp,
+  ChevronDown,
+  Command,
   CornerDownLeft,
-  Database,
-  Globe,
   Image,
   Loader2,
   StopCircle,
   X,
-  Pen,
-  Sparkles,
-  Brain,
 } from "lucide-react";
-import { App, Platform, TFile } from "obsidian";
+import { App, Notice, Platform, TFile } from "obsidian";
 import React, {
   forwardRef,
   useCallback,
@@ -48,6 +48,8 @@ import React, {
 } from "react";
 import { useDropzone } from "react-dropzone";
 import ContextControl from "./ContextControl";
+import { getCachedCustomCommands } from "@/commands/state";
+import { sortSlashCommands } from "@/commands/customCommandUtils";
 
 interface ChatInputProps {
   inputMessage: string;
@@ -71,7 +73,6 @@ interface ChatInputProps {
   disableModelSwitch?: boolean;
   selectedTextContexts?: SelectedTextContext[];
   onRemoveSelectedText?: (id: string) => void;
-  showProgressCard: () => void;
 }
 
 const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
@@ -94,32 +95,24 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
       disableModelSwitch,
       selectedTextContexts,
       onRemoveSelectedText,
-      showProgressCard,
     },
     ref
   ) => {
+    const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
     const [contextUrls, setContextUrls] = useState<string[]>([]);
     const textAreaRef = useRef<HTMLTextAreaElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const [currentModelKey, setCurrentModelKey] = useModelKey();
+    const [modelError, setModelError] = useState<string | null>(null);
     const [currentChain] = useChainType();
     const [isProjectLoading] = useProjectLoading();
-    const settings = useSettingsValue();
-    const [currentActiveNote, setCurrentActiveNote] = useState<TFile | null>(() => {
-      const activeFile = app.workspace.getActiveFile();
-      return isAllowedFileForContext(activeFile) ? activeFile : null;
-    });
+    const [currentActiveNote, setCurrentActiveNote] = useState<TFile | null>(
+      app.workspace.getActiveFile()
+    );
     const [selectedProject, setSelectedProject] = useState<ProjectConfig | null>(null);
+    const settings = useSettingsValue();
     const isCopilotPlus =
       currentChain === ChainType.COPILOT_PLUS_CHAIN || currentChain === ChainType.PROJECT_CHAIN;
-
-    // Toggle states for vault, web search, composer, and autonomous agent
-    const [vaultToggle, setVaultToggle] = useState(false);
-    const [webToggle, setWebToggle] = useState(false);
-    const [composerToggle, setComposerToggle] = useState(false);
-    const [autonomousAgentToggle, setAutonomousAgentToggle] = useState(
-      settings.enableAutonomousAgent
-    );
     const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
     const loadingMessages = [
       "Loading the project context...",
@@ -132,17 +125,6 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
         textAreaRef.current?.focus();
       },
     }));
-
-    // Sync autonomous agent toggle with settings and chain type
-    useEffect(() => {
-      if (currentChain === ChainType.PROJECT_CHAIN) {
-        // Force off in Projects mode
-        setAutonomousAgentToggle(false);
-      } else {
-        // In other modes, use the actual settings value
-        setAutonomousAgentToggle(settings.enableAutonomousAgent);
-      }
-    }, [settings.enableAutonomousAgent, currentChain]);
 
     useEffect(() => {
       if (currentChain === ChainType.PROJECT_CHAIN) {
@@ -181,24 +163,14 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
       return currentModelKey;
     };
 
-    const onSendMessage = () => {
+    const onSendMessage = (includeVault: boolean) => {
       if (!isCopilotPlus) {
         handleSendMessage();
         return;
       }
 
-      // Build tool calls based on toggle states
-      const toolCalls: string[] = [];
-      // Only add tool calls when autonomous agent is off
-      // When autonomous agent is on, it handles all tools internally
-      if (!autonomousAgentToggle) {
-        if (vaultToggle) toolCalls.push("@vault");
-        if (webToggle) toolCalls.push("@websearch");
-        if (composerToggle) toolCalls.push("@composer");
-      }
-
       handleSendMessage({
-        toolCalls,
+        toolCalls: includeVault ? ["@vault"] : [],
         contextNotes,
         urls: contextUrls,
       });
@@ -209,13 +181,7 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
       const cursorPos = event.target.selectionStart;
 
       // Check for slash BEFORE updating state
-      // Only show slash modal if:
-      // 1. We just typed a "/" AND
-      // 2. Either the input is empty OR there's a space before the "/"
-      const shouldShowSlashModal =
-        cursorPos > 0 &&
-        inputValue[cursorPos - 1] === "/" &&
-        (cursorPos === 1 || inputValue[cursorPos - 2] === " ");
+      const shouldShowSlashModal = cursorPos > 0 && inputValue[cursorPos - 1] === "/";
 
       setInputMessage(inputValue);
       adjustTextareaHeight();
@@ -357,22 +323,35 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.nativeEvent.isComposing) return;
 
+      // 保持 Cmd+Shift+Enter (Mac) 或 Ctrl+Shift+Enter (Windows) 发送 vault 的逻辑不变
+      if (e.key === "Enter" && e.shiftKey && (Platform.isMacOS ? e.metaKey : e.ctrlKey)) {
+        e.preventDefault();
+        e.stopPropagation();
+        onSendMessage(true);
+        return;
+      }
+
       if (e.key === "Enter") {
         /**
-         * send msg:
-         *         1. non-mobile platforms: only input Enter
-         *         2. mobile platforms: Shift+Enter
+         * 新逻辑：
+         *   1. 非移动端：Enter 发送，Shift+Enter 换行
+         *   2. 移动端：Enter 发送，Shift+Enter 换行（可选，或保持原逻辑）
          */
-        const shouldSendMessage =
-          (!e.shiftKey && !Platform.isMobile) || (e.shiftKey && Platform.isMobile);
-
-        if (!shouldSendMessage) {
-          // do nothing here, allowing the default newline behavior
+        const isMobile = Platform.isMobile;
+        // 非移动端 Shift+Enter 换行
+        if (!isMobile && e.shiftKey) {
+          // 允许换行，默认行为
           return;
         }
-
+        // 移动端 Shift+Enter 换行（如需保持原逻辑可调整）
+        if (isMobile && e.shiftKey) {
+          // 允许换行，默认行为
+          return;
+        }
+        // 其它情况（如仅 Enter），发送消息
         e.preventDefault();
-        onSendMessage();
+        onSendMessage(false);
+        return;
       }
     };
 
@@ -461,7 +440,7 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
         // Set new timeout
         timeoutId = setTimeout(() => {
           const activeNote = app.workspace.getActiveFile();
-          setCurrentActiveNote(isAllowedFileForContext(activeNote) ? activeNote : null);
+          setCurrentActiveNote(activeNote);
         }, 100); // Wait 100ms after the last event because it fires multiple times
       };
 
@@ -511,7 +490,6 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
           onRemoveUrl={(url: string) => setContextUrls((prev) => prev.filter((u) => u !== url))}
           selectedTextContexts={selectedTextContexts}
           onRemoveSelectedText={onRemoveSelectedText}
-          showProgressCard={showProgressCard}
         />
 
         {selectedImages.length > 0 && (
@@ -548,7 +526,7 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
             ref={textAreaRef}
             className="tw-max-h-40 tw-min-h-[60px] tw-w-full tw-resize-none tw-overflow-y-auto tw-rounded-md tw-border-none tw-bg-transparent tw-px-2 tw-text-sm tw-text-normal focus-visible:tw-ring-0"
             placeholder={
-              "Ask anything. [[ for notes. / for custom prompts. " +
+              "Inquire. Prompt. Create." +
               (isCopilotPlus ? "@ for tools." : "")
             }
             value={inputMessage}
@@ -571,25 +549,100 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
         </div>
 
         <div className="tw-flex tw-h-6 tw-justify-between tw-gap-1 tw-px-1">
+          {/* 新版 context 开关，模仿 chat 按钮样式 */}
+          <Button
+            variant="ghost2"
+            size="fit"
+            className="tw-flex tw-items-center tw-gap-1"
+            style={{ color: includeActiveNote ? "#22c55e" : "#ef4444" }}
+            title={includeActiveNote ? "当前笔记已作为上下文发送" : "当前笔记未作为上下文发送"}
+            onClick={() => setIncludeActiveNote(!includeActiveNote)}
+          >
+            <span
+              style={{
+                display: "inline-block",
+                width: 10,
+                height: 10,
+                borderRadius: "50%",
+                background: includeActiveNote ? "#22c55e" : "#ef4444",
+                marginRight: 6,
+                border: "1px solid #888",
+                transition: "background 0.2s",
+              }}
+            />
+            <span style={{ fontSize: 13, fontWeight: 500 }}>Context</span>
+          </Button>
           {isGenerating ? (
             <div className="tw-flex tw-items-center tw-gap-1 tw-px-1 tw-text-sm tw-text-faint">
               <Loader2 className="tw-size-3 tw-animate-spin" />
               <span>Generating...</span>
             </div>
           ) : (
-            <ModelSelector
-              variant="ghost2"
-              size="fit"
-              disabled={disableModelSwitch}
-              value={getDisplayModelKey()}
-              onChange={(modelKey) => {
-                // In project mode, we don't update the global model key
-                // as the project model takes precedence
-                if (currentChain !== ChainType.PROJECT_CHAIN) {
-                  setCurrentModelKey(modelKey);
-                }
-              }}
-            />
+            <DropdownMenu open={isModelDropdownOpen} onOpenChange={setIsModelDropdownOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost2" size="fit" disabled={disableModelSwitch}>
+                  {modelError ? (
+                    <span className="tw-text-error">Model Load Failed</span>
+                  ) : settings.activeModels.find(
+                      (model) =>
+                        model.enabled && getModelKeyFromModel(model) === getDisplayModelKey()
+                    ) ? (
+                    <ModelDisplay
+                      model={
+                        settings.activeModels.find(
+                          (model) =>
+                            model.enabled && getModelKeyFromModel(model) === getDisplayModelKey()
+                        )!
+                      }
+                      iconSize={8}
+                    />
+                  ) : (
+                    "Select Model"
+                  )}
+                  {!disableModelSwitch && <ChevronDown className="tw-mt-0.5 tw-size-5" />}
+                </Button>
+              </DropdownMenuTrigger>
+
+              <DropdownMenuContent align="start">
+                {!disableModelSwitch &&
+                  settings.activeModels
+                    .filter((model) => model.enabled)
+                    .map((model) => {
+                      const { hasApiKey, errorNotice } = checkModelApiKey(model, settings);
+                      return (
+                        <DropdownMenuItem
+                          key={getModelKeyFromModel(model)}
+                          onSelect={async (event) => {
+                            if (!hasApiKey && errorNotice) {
+                              event.preventDefault();
+                              new Notice(errorNotice);
+                              return;
+                            }
+
+                            try {
+                              setModelError(null);
+                              setCurrentModelKey(getModelKeyFromModel(model));
+                            } catch (error) {
+                              const msg = `Model switch failed: ` + err2String(error);
+                              setModelError(msg);
+                              new Notice(msg);
+                              // Restore to the last valid model
+                              const lastValidModel = settings.activeModels.find(
+                                (m) => m.enabled && getModelKeyFromModel(m) === currentModelKey
+                              );
+                              if (lastValidModel) {
+                                setCurrentModelKey(getModelKeyFromModel(lastValidModel));
+                              }
+                            }
+                          }}
+                          className={!hasApiKey ? "tw-cursor-not-allowed tw-opacity-50" : ""}
+                        >
+                          <ModelDisplay model={model} iconSize={12} />
+                        </DropdownMenuItem>
+                      );
+                    })}
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
 
           <div className="tw-flex tw-items-center tw-gap-1">
@@ -605,80 +658,13 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
               </Button>
             ) : (
               <>
-                {/* Autonomous Agent button - only show in Copilot Plus mode and NOT in Projects mode */}
-                {isCopilotPlus && currentChain !== ChainType.PROJECT_CHAIN && (
-                  <Button
-                    variant="ghost2"
-                    size="fit"
-                    onClick={() => {
-                      const newValue = !autonomousAgentToggle;
-                      setAutonomousAgentToggle(newValue);
-                      updateSetting("enableAutonomousAgent", newValue);
-                    }}
-                    className={cn(
-                      "tw-mr-2 tw-text-muted hover:tw-text-accent",
-                      autonomousAgentToggle && "tw-text-accent tw-bg-accent/10"
-                    )}
-                    title="Toggle autonomous agent mode"
-                  >
-                    <Brain className="tw-size-4" />
-                  </Button>
-                )}
-
-                {/* Toggle buttons for vault, web search, and composer - show when Autonomous Agent is off */}
-                {!autonomousAgentToggle && isCopilotPlus && (
-                  <>
-                    <Button
-                      variant="ghost2"
-                      size="fit"
-                      onClick={() => setVaultToggle(!vaultToggle)}
-                      className={cn(
-                        "tw-mr-2 tw-text-muted hover:tw-text-accent",
-                        vaultToggle && "tw-text-accent tw-bg-accent/10"
-                      )}
-                      title="Toggle vault search"
-                    >
-                      <Database className="tw-size-4" />
-                    </Button>
-                    <Button
-                      variant="ghost2"
-                      size="fit"
-                      onClick={() => setWebToggle(!webToggle)}
-                      className={cn(
-                        "tw-mr-2 tw-text-muted hover:tw-text-accent",
-                        webToggle && "tw-text-accent tw-bg-accent/10"
-                      )}
-                      title="Toggle web search"
-                    >
-                      <Globe className="tw-size-4" />
-                    </Button>
-                    <Button
-                      variant="ghost2"
-                      size="fit"
-                      onClick={() => setComposerToggle(!composerToggle)}
-                      className={cn(
-                        "tw-mr-2 tw-text-muted hover:tw-text-accent",
-                        composerToggle && "tw-text-accent tw-bg-accent/10"
-                      )}
-                      title="Toggle composer (note editing)"
-                    >
-                      <span className="tw-flex tw-items-center tw-gap-0.5">
-                        <Sparkles className="tw-size-2" />
-                        <Pen className="tw-size-3" />
-                      </span>
-                    </Button>
-                  </>
-                )}
-
                 {isCopilotPlus && (
                   <Button
                     variant="ghost2"
                     size="fit"
-                    className="tw-text-muted hover:tw-text-accent"
                     onClick={() => {
                       new AddImageModal(app, onAddImage).open();
                     }}
-                    title="Add image(s)"
                   >
                     <Image className="tw-size-4" />
                   </Button>
@@ -687,11 +673,37 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
                   variant="ghost2"
                   size="fit"
                   className="tw-text-muted"
-                  onClick={() => onSendMessage()}
+                  onClick={() => onSendMessage(false)}
                 >
                   <CornerDownLeft className="!tw-size-3" />
                   <span>chat</span>
                 </Button>
+
+                {currentChain === "copilot_plus" && (
+                  <Button
+                    variant="ghost2"
+                    size="fit"
+                    className="tw-hidden tw-text-muted @xs/chat-input:tw-inline-flex"
+                    onClick={() => onSendMessage(true)}
+                  >
+                    <div className="tw-flex tw-items-center tw-gap-1">
+                      {Platform.isMacOS ? (
+                        <div className="tw-flex tw-items-center">
+                          <Command className="!tw-size-3" />
+                          <ArrowBigUp className="!tw-size-3" />
+                          <CornerDownLeft className="!tw-size-3" />
+                        </div>
+                      ) : (
+                        <div className="tw-flex tw-items-center">
+                          <span>Ctrl</span>
+                          <ArrowBigUp className="tw-size-4" />
+                          <CornerDownLeft className="!tw-size-3" />
+                        </div>
+                      )}
+                      <span>vault</span>
+                    </div>
+                  </Button>
+                )}
               </>
             )}
           </div>

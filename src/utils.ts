@@ -12,7 +12,7 @@ import {
 } from "@/constants";
 import { logInfo } from "@/logger";
 import { CopilotSettings } from "@/settings/model";
-import { ChatMessage } from "@/types/message";
+import { ChatMessage } from "@/sharedState";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { MemoryVariables } from "@langchain/core/memory";
 import { RunnableSequence } from "@langchain/core/runnables";
@@ -280,31 +280,17 @@ export function getFileName(file: TFile): string {
   return file.basename;
 }
 
-/**
- * Check if a file is allowed for context (markdown, PDF, or canvas files)
- * @param file The file to check
- * @returns true if the file is allowed, false otherwise
- */
-export function isAllowedFileForContext(file: TFile | null): boolean {
-  if (!file) return false;
-  return file.extension === "md" || file.extension === "pdf" || file.extension === "canvas";
-}
-
 export async function getAllNotesContent(vault: Vault): Promise<string> {
-  const vaultNotes: string[] = [];
+  let allContent = "";
 
   const markdownFiles = vault.getMarkdownFiles();
 
   for (const file of markdownFiles) {
     const fileContent = await vault.cachedRead(file);
-    // Import is not available at the top level due to circular dependency
-    const { VAULT_NOTE_TAG } = await import("@/constants");
-    vaultNotes.push(
-      `<${VAULT_NOTE_TAG}>\n<path>${file.path}</path>\n<content>\n${fileContent}\n</content>\n</${VAULT_NOTE_TAG}>`
-    );
+    allContent += fileContent + " ";
   }
 
-  return vaultNotes.join("\n\n");
+  return allContent;
 }
 
 export function areEmbeddingModelsSame(
@@ -376,17 +362,6 @@ export interface ChatHistoryEntry {
   content: string;
 }
 
-/**
- * Extract text-only chat history from memory variables.
- * This function pairs messages by index (i, i+1) and returns only string content.
- *
- * Note: For multimodal chains (CopilotPlus, AutonomousAgent), use
- * chatHistoryUtils.processRawChatHistory instead to preserve image content.
- *
- * @param memoryVariables Memory variables from LangChain memory
- * @returns Array of text-only chat history entries
- */
-// TODO: Deprecated, use chatHistoryUtils.processRawChatHistory instead
 export function extractChatHistory(memoryVariables: MemoryVariables): ChatHistoryEntry[] {
   const chatHistory: ChatHistoryEntry[] = [];
   const { history } = memoryVariables;
@@ -500,11 +475,6 @@ export function isYoutubeUrl(url: string): boolean {
 export function extractYoutubeUrl(text: string): string | null {
   const match = text.match(YOUTUBE_URL_REGEX);
   return match ? match[0] : null;
-}
-
-export function extractAllYoutubeUrls(text: string): string[] {
-  const matches = text.matchAll(new RegExp(YOUTUBE_URL_REGEX, "g"));
-  return Array.from(matches, (match) => match[0]);
 }
 
 /** Proxy function to use in place of fetch() to bypass CORS restrictions.
@@ -670,41 +640,6 @@ export function getProviderKeyManagementURL(provider: string): string {
   return ProviderInfo[provider as Provider]?.keyManagementURL || "";
 }
 
-/**
- * Cleans a message by removing Think blocks, Action blocks (writeToFile), and tool call markers
- * for copying to clipboard. This is more comprehensive than removeThinkTags which is used for RAG.
- */
-export function cleanMessageForCopy(message: string): string {
-  let cleanedMessage = message;
-
-  // First use the existing removeThinkTags function
-  cleanedMessage = removeThinkTags(cleanedMessage);
-
-  // Remove writeToFile blocks wrapped in XML codeblocks
-  cleanedMessage = cleanedMessage.replace(
-    /```xml\s*[\s\S]*?<writeToFile>[\s\S]*?<\/writeToFile>[\s\S]*?```/g,
-    ""
-  );
-
-  // Remove standalone writeToFile blocks
-  cleanedMessage = cleanedMessage.replace(/<writeToFile>[\s\S]*?<\/writeToFile>/g, "");
-
-  // Remove tool call markers
-  // Format: <!--TOOL_CALL_START:id:toolName:displayName:emoji:confirmationMessage:isExecuting-->content<!--TOOL_CALL_END:id:result-->
-  cleanedMessage = cleanedMessage.replace(
-    /<!--TOOL_CALL_START:[^:]+:[^:]+:[^:]+:[^:]+:[^:]*:[^:]+-->[\s\S]*?<!--TOOL_CALL_END:[^:]+:[\s\S]*?-->/g,
-    ""
-  );
-
-  // Clean up any resulting multiple consecutive newlines (more than 2)
-  cleanedMessage = cleanedMessage.replace(/\n{3,}/g, "\n\n");
-
-  // Trim leading and trailing whitespace
-  cleanedMessage = cleanedMessage.trim();
-
-  return cleanedMessage;
-}
-
 export async function insertIntoEditor(message: string, replace: boolean = false) {
   let leaf = app.workspace.getMostRecentLeaf();
   if (!leaf) {
@@ -726,8 +661,8 @@ export async function insertIntoEditor(message: string, replace: boolean = false
   const cursorFrom = editor.getCursor("from");
   const cursorTo = editor.getCursor("to");
 
-  // Clean the message before inserting (removes think tags, writeToFile blocks, tool calls)
-  const cleanedMessage = cleanMessageForCopy(message);
+  // Remove think tags before inserting
+  const cleanedMessage = removeThinkTags(message);
 
   if (replace) {
     editor.replaceRange(cleanedMessage, cursorFrom, cursorTo);
@@ -784,8 +719,6 @@ export async function checkLatestVersion(): Promise<{
   }
 }
 
-// Note: LangChain 0.6.6+ handles O-series and GPT-5 models automatically
-// These functions are kept for backward compatibility and specific checks
 export function isOSeriesModel(model: BaseChatModel | string): boolean {
   if (typeof model === "string") {
     return model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4");
@@ -794,42 +727,6 @@ export function isOSeriesModel(model: BaseChatModel | string): boolean {
   // For BaseChatModel instances
   const modelName = (model as any).modelName || (model as any).model || "";
   return modelName.startsWith("o1") || modelName.startsWith("o3") || modelName.startsWith("o4");
-}
-
-export function isGPT5Model(model: BaseChatModel | string): boolean {
-  if (typeof model === "string") {
-    return model.startsWith("gpt-5");
-  }
-
-  // For BaseChatModel instances
-  const modelName = (model as any).modelName || (model as any).model || "";
-  return modelName.startsWith("gpt-5");
-}
-
-/**
- * Utility for determining model characteristics
- * Note: Most of this is handled by LangChain 0.6.6+ internally
- */
-export interface ModelInfo {
-  isOSeries: boolean;
-  isGPT5: boolean;
-  isThinkingEnabled: boolean;
-}
-
-export function getModelInfo(model: BaseChatModel | string): ModelInfo {
-  const modelName =
-    typeof model === "string" ? model : (model as any).modelName || (model as any).model || "";
-
-  const isOSeries = isOSeriesModel(modelName);
-  const isGPT5 = isGPT5Model(modelName);
-  const isThinkingEnabled =
-    modelName.startsWith("claude-3-7-sonnet") || modelName.startsWith("claude-sonnet-4");
-
-  return {
-    isOSeries,
-    isGPT5,
-    isThinkingEnabled,
-  };
 }
 
 export function getMessageRole(
@@ -951,11 +848,4 @@ export async function withSuppressedTokenWarnings<T>(fn: () => Promise<T>): Prom
     // Always restore original console.warn, even if an error occurs
     console.warn = originalWarn;
   }
-}
-
-/**
- * Check if the current Obsidian editor setting is in live preview mode
- */
-export function isLivePreviewModeOn(): boolean {
-  return !!(app.vault as any).config?.livePreview;
 }

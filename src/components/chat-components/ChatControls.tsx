@@ -7,12 +7,9 @@ import { DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-
 import { SettingSwitch } from "@/components/ui/setting-switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PLUS_UTM_MEDIUMS } from "@/constants";
-import { logError } from "@/logger";
 import { navigateToPlusPage, useIsPlusUser } from "@/plusUtils";
 import VectorStoreManager from "@/search/vectorStoreManager";
 import { updateSetting, useSettingsValue } from "@/settings/model";
-import { Docs4LLMParser } from "@/tools/FileParserManager";
-import { isRateLimitError } from "@/utils/rateLimitUtils";
 import { DropdownMenu, DropdownMenuTrigger } from "@radix-ui/react-dropdown-menu";
 import {
   AlertTriangle,
@@ -77,13 +74,8 @@ export async function reloadCurrentProject() {
       throw new Error("Copilot plugin or ProjectManager not available.");
     }
   } catch (error) {
-    logError("Error reloading project context:", error);
-
-    // Check if this is a rate limit error and let the FileParserManager notice handle it
-    if (!isRateLimitError(error)) {
-      new Notice("Failed to reload project context. Check console for details.");
-    }
-    // If it's a rate limit error, don't show generic failure message - let the rate limit notice show
+    console.error("Error reloading project context:", error);
+    new Notice("Failed to reload project context. Check console for details.");
   } finally {
     setProjectLoading(false); // Stop loading indicator
   }
@@ -107,9 +99,6 @@ export async function forceRebuildCurrentProjectContext() {
         );
 
         // Step 1: Completely clear all cached data for this project (in-memory and on-disk)
-        // Reset rate limit notice timer to allow showing notices during force rebuild
-        Docs4LLMParser.resetRateLimitNoticeTimer();
-
         await ProjectContextCache.getInstance().clearForProject(currentProject);
         new Notice(`Cache for project "${currentProject.name}" has been cleared.`);
 
@@ -126,13 +115,8 @@ export async function forceRebuildCurrentProjectContext() {
           throw new Error("Copilot plugin or ProjectManager not available for rebuild.");
         }
       } catch (error) {
-        logError("Error force rebuilding project context:", error);
-
-        // Check if this is a rate limit error and let the FileParserManager notice handle it
-        if (!isRateLimitError(error)) {
-          new Notice("Failed to force rebuild project context. Check console for details.");
-        }
-        // If it's a rate limit error, don't show generic failure message - let the rate limit notice show
+        console.error("Error force rebuilding project context:", error);
+        new Notice("Failed to force rebuild project context. Check console for details.");
       } finally {
         setProjectLoading(false); // Stop loading indicator
       }
@@ -178,12 +162,12 @@ export function ChatControls({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost2" size="fit" className="tw-ml-1">
-              {selectedChain === ChainType.LLM_CHAIN && "chat (free)"}
-              {selectedChain === ChainType.VAULT_QA_CHAIN && "vault QA (free)"}
+              {selectedChain === ChainType.LLM_CHAIN && "chat"}
+              {selectedChain === ChainType.VAULT_QA_CHAIN && "vault QA"}
               {selectedChain === ChainType.COPILOT_PLUS_CHAIN && (
                 <div className="tw-flex tw-items-center tw-gap-1">
                   <Sparkles className="tw-size-4" />
-                  copilot plus
+                  copilot plus (beta)
                 </div>
               )}
               {selectedChain === ChainType.PROJECT_CHAIN && "projects (alpha)"}
@@ -196,14 +180,14 @@ export function ChatControls({
                 handleModeChange(ChainType.LLM_CHAIN);
               }}
             >
-              chat (free)
+              chat
             </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() => {
                 handleModeChange(ChainType.VAULT_QA_CHAIN);
               }}
             >
-              vault QA (free)
+              vault QA
             </DropdownMenuItem>
             {isPlusUser ? (
               <DropdownMenuItem
@@ -213,7 +197,7 @@ export function ChatControls({
               >
                 <div className="tw-flex tw-items-center tw-gap-1">
                   <Sparkles className="tw-size-4" />
-                  copilot plus
+                  copilot plus (beta)
                 </div>
               </DropdownMenuItem>
             ) : (
@@ -223,7 +207,7 @@ export function ChatControls({
                   onCloseProject?.();
                 }}
               >
-                copilot plus
+                copilot plus (beta)
                 <SquareArrowOutUpRight className="tw-size-3" />
               </DropdownMenuItem>
             )}
@@ -245,7 +229,7 @@ export function ChatControls({
                   onCloseProject?.();
                 }}
               >
-                copilot plus
+                copilot plus (beta)
                 <SquareArrowOutUpRight className="tw-size-3" />
               </DropdownMenuItem>
             )}

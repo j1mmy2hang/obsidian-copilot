@@ -76,7 +76,7 @@ const createAndPopulateGroupList = (
   exclusionPatterns: PatternCategory | null
 ): GroupListItem => {
   const projectAllFiles = appFiles.filter((file) =>
-    shouldIndexFile(file, inclusionPatterns, exclusionPatterns, true)
+    shouldIndexFile(file, inclusionPatterns, exclusionPatterns)
   );
 
   // Initialize groups

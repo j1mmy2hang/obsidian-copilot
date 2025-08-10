@@ -189,7 +189,6 @@ export class RelevantNotesCache {
    */
   clearCache() {
     this.currentNotePath = null;
-    this.cachedNotes = null;
     this.cachedNoteTitles = [];
   }
 }

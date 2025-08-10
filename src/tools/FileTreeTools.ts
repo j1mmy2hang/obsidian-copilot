@@ -1,7 +1,7 @@
+import { tool } from "@langchain/core/tools";
 import { TFile, TFolder } from "obsidian";
-import { getMatchingPatterns, shouldIndexFile } from "@/search/searchUtils";
 import { z } from "zod";
-import { createTool } from "./SimpleTool";
+import { getMatchingPatterns, shouldIndexFile } from "@/search/searchUtils";
 
 interface FileTreeNode {
   files?: string[];
@@ -94,11 +94,8 @@ function buildFileTree(
 }
 
 const createGetFileTreeTool = (root: TFolder) =>
-  createTool({
-    name: "getFileTree",
-    description: "Get the file tree as a nested structure of folders and files",
-    schema: z.void(),
-    handler: async () => {
+  tool(
+    async () => {
       // First try building the tree with files included
       const tree = buildFileTree(root, true);
 
@@ -121,7 +118,11 @@ const createGetFileTreeTool = (root: TFolder) =>
 
       return prompt + jsonResult;
     },
-    isBackground: true,
-  });
+    {
+      name: "getFileTree",
+      description: "Get the file tree as a nested structure of folders and files",
+      schema: z.void(),
+    }
+  );
 
 export { createGetFileTreeTool, buildFileTree, type FileTreeNode };

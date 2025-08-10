@@ -220,56 +220,6 @@ function ItemCard({ item, viewMode, onDelete }: ItemCardProps) {
   );
 }
 
-function CategoryItemCard({
-  item,
-  onClick,
-}: {
-  item: CategoryItem;
-  onClick: (item: CategoryItem) => void;
-}) {
-  let IconComponent;
-  let iconColorClassName;
-
-  switch (item.type) {
-    case "tag":
-      IconComponent = TagIcon;
-      iconColorClassName = "tw-text-context-manager-orange";
-      break;
-    case "folder":
-      IconComponent = FolderIcon;
-      iconColorClassName = "tw-text-context-manager-yellow";
-      break;
-    case "files":
-      IconComponent = FileText;
-      iconColorClassName = "tw-text-context-manager-blue";
-      break;
-    case "ignoreFiles":
-      IconComponent = XIcon;
-      iconColorClassName = "tw-text-context-manager-red";
-      break;
-  }
-
-  return (
-    <div
-      className="tw-group tw-flex tw-cursor-pointer tw-items-center tw-rounded-lg tw-border tw-border-solid tw-border-border tw-p-2 tw-transition-shadow hover:tw-shadow-md"
-      onClick={() => onClick(item)}
-    >
-      <div className="tw-mr-2 tw-shrink-0">
-        <IconComponent className={`tw-size-6 ${iconColorClassName}`} />
-      </div>
-      <div className="tw-flex tw-min-w-0 tw-flex-1 tw-flex-col">
-        <TruncatedText className="tw-flex-1 tw-text-sm tw-font-medium">
-          {item.type === "tag" && <span className="tw-mr-2 tw-text-faint">#</span>}
-          {item.name}
-        </TruncatedText>
-        <TruncatedText className="tw-flex-1 tw-text-xs tw-text-faint">
-          {item.count} {item.count === 1 ? "item" : "items"}
-        </TruncatedText>
-      </div>
-    </div>
-  );
-}
-
 interface ContextManageProps {
   initialProject: ProjectConfig;
   onSave: (project: ProjectConfig) => void;
@@ -294,20 +244,6 @@ interface IgnoreItems {
   files: Set<TFile>;
 }
 
-interface CategoryItem {
-  id: string;
-  name: string;
-  type: "tag" | "folder" | "files" | "ignoreFiles";
-  originalId?: string;
-  count: number;
-}
-
-type DisplayItem = GroupItem | CategoryItem;
-
-function isCategoryItem(item: DisplayItem): item is CategoryItem {
-  return "type" in item;
-}
-
 function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageProps) {
   const { inclusions: inclusionPatterns, exclusions: exclusionPatterns } = useMemo(() => {
     return getMatchingPatterns({
@@ -329,7 +265,7 @@ function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageP
       exclusionPatterns: PatternCategory | null
     ): GroupListItem => {
       const projectAllFiles = appFiles.filter((file) =>
-        shouldIndexFile(file, inclusionPatterns, exclusionPatterns, true)
+        shouldIndexFile(file, inclusionPatterns, exclusionPatterns)
       );
 
       const processPatternGroup = (
@@ -342,7 +278,7 @@ function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageP
           patterns.forEach((pattern) => {
             const singlePatternConfig = { [patternType]: [pattern] };
             if (
-              shouldIndexFile(file, singlePatternConfig, null, true) &&
+              shouldIndexFile(file, singlePatternConfig, null) &&
               !targetGroup[pattern].some((item) => item.id === file.path)
             ) {
               targetGroup[pattern].push({
@@ -389,7 +325,7 @@ function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageP
         // note/file
         if (
           inclusionPatterns?.notePatterns &&
-          shouldIndexFile(file, { notePatterns: inclusionPatterns.notePatterns }, null, true) &&
+          shouldIndexFile(file, { notePatterns: inclusionPatterns.notePatterns }, null) &&
           !notes.some((item) => item.id === file.path)
         ) {
           notes.push({
@@ -416,7 +352,7 @@ function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageP
   const [ignoreItems, setIgnoreItems] = useState<IgnoreItems>(() => {
     // init exclude files
     const excludeFiles = appAllFiles.filter(
-      (file) => exclusionPatterns && shouldIndexFile(file, exclusionPatterns, null, true)
+      (file) => exclusionPatterns && shouldIndexFile(file, exclusionPatterns, null)
     );
     return {
       files: new Set<TFile>(excludeFiles),
@@ -524,13 +460,7 @@ function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageP
     return { tags, titles, extensions };
   }, []);
 
-  const sortItems = useCallback((items: DisplayItem[]) => {
-    return [...items].sort((a, b) => {
-      return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
-    });
-  }, []);
-
-  const getDisplayItems = useMemo<DisplayItem[]>(() => {
+  const getDisplayItems = useMemo(() => {
     if (searchTerm) {
       // Custom search
       const parsedQuery = parseSearchQuery(searchTerm);
@@ -617,55 +547,6 @@ function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageP
       }));
     }
 
-    // When no part is selected, return all items
-    if (!activeSection) {
-      const tagItems = sortItems(
-        Object.entries(groupList.tags).map(([tagId, files]) => ({
-          id: `tag:${tagId}`,
-          name: tagId.slice(1),
-          type: "tag",
-          originalId: tagId,
-          count: files.length,
-        }))
-      );
-
-      const folderItems = sortItems(
-        Object.entries(groupList.folders).map(([folderId, files]) => ({
-          id: `folder:${folderId}`,
-          name: folderId,
-          type: "folder",
-          originalId: folderId,
-          count: files.length,
-        }))
-      );
-
-      const filesItem =
-        groupList.notes.length > 0
-          ? [
-              {
-                id: "files:all",
-                name: "Files",
-                type: "files",
-                count: groupList.notes.length,
-              },
-            ]
-          : [];
-
-      const ignoreFilesItem =
-        ignoreItems.files.size > 0
-          ? [
-              {
-                id: "ignoreFiles:all",
-                name: "Ignore Files",
-                type: "ignoreFiles",
-                count: ignoreItems.files.size,
-              },
-            ]
-          : [];
-
-      return [...tagItems, ...folderItems, ...filesItem, ...ignoreFilesItem];
-    }
-
     return [];
   }, [
     searchTerm,
@@ -679,8 +560,13 @@ function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageP
     groupList.notes,
     groupList.extensions,
     ignoreItems.files,
-    sortItems,
   ]);
+
+  const sortItems = useCallback((items: GroupItem[]) => {
+    return [...items].sort((a, b) => {
+      return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+    });
+  }, []);
 
   const makeSectionItem = useCallback(
     (
@@ -706,7 +592,7 @@ function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageP
     ) => {
       const getMatchingFilesFromApp = (patterns: PatternCategory): GroupItem[] => {
         return appAllFiles
-          .filter((file) => shouldIndexFile(file, patterns, null, true))
+          .filter((file) => shouldIndexFile(file, patterns, null))
           .map((file) => ({
             id: file.path,
             name: file.basename,
@@ -897,21 +783,6 @@ function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageP
     setActiveState,
   ]);
 
-  const handleCategoryItemClick = useCallback(
-    (item: CategoryItem) => {
-      if (item.type === "tag" && item.originalId) {
-        groupHandlers.click.tag(item.originalId);
-      } else if (item.type === "folder" && item.originalId) {
-        groupHandlers.click.folder(item.originalId);
-      } else if (item.type === "files") {
-        groupHandlers.click.files();
-      } else if (item.type === "ignoreFiles") {
-        groupHandlers.click.ignoreFiles();
-      }
-    },
-    [groupHandlers]
-  );
-
   const getDisplayTitle = () => {
     if (searchTerm) return `Search Results for: "${searchTerm}"`;
     if (activeSection === "tags" && activeItem) {
@@ -925,7 +796,7 @@ function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageP
       return `Extension: ${activeItem}`;
     }
     if (activeSection === "ignoreFiles") return "Ignore Files";
-    return "All Categories";
+    return "Select a category to view items";
   };
 
   const handleDeleteItem = (e: React.MouseEvent, item: GroupItem) => {
@@ -1132,40 +1003,22 @@ function ContextManage({ initialProject, onSave, onCancel, app }: ContextManageP
                 <div className="tw-mt-10 tw-text-center tw-text-muted">
                   {activeSection
                     ? "No items found."
-                    : "No categories found. Add tags, folders, or files using the sidebar."}
+                    : "Select a category from the sidebar to view items."}
                 </div>
               ) : (
                 <div className="tw-space-y-2" style={{ display: "block" }}>
-                  {activeSection || searchTerm
-                    ? // When a category is selected or a search is performed, display the normal item list.
-                      sortItems(getDisplayItems)
-                        .map((item) =>
-                          !isCategoryItem(item) ? (
-                            <ItemCard
-                              key={item.id}
-                              item={item}
-                              viewMode="list"
-                              onDelete={
-                                activeSection === "ignoreFiles" || item.isIgnored
-                                  ? handleDeleteIgnoreItem
-                                  : handleDeleteItem
-                              }
-                            />
-                          ) : null
-                        )
-                        .filter(Boolean)
-                    : // When no category is selected and no search, display the grouped category list.
-                      getDisplayItems
-                        .map((item) =>
-                          isCategoryItem(item) ? (
-                            <CategoryItemCard
-                              key={item.id}
-                              item={item}
-                              onClick={handleCategoryItemClick}
-                            />
-                          ) : null
-                        )
-                        .filter(Boolean)}
+                  {sortItems(getDisplayItems).map((item) => (
+                    <ItemCard
+                      key={item.id}
+                      item={item}
+                      viewMode="list"
+                      onDelete={
+                        activeSection === "ignoreFiles" || item.isIgnored
+                          ? handleDeleteIgnoreItem
+                          : handleDeleteItem
+                      }
+                    />
+                  ))}
                 </div>
               )}
             </ScrollArea>

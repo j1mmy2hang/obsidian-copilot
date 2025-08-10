@@ -131,15 +131,12 @@ export class BrevilabsClient {
     }
 
     body.user_id = getSettings().userId;
-
     const url = new URL(`${BREVILABS_API_BASE_URL}${endpoint}`);
     if (method === "GET") {
-      // Add query parameters for GET requests
       Object.entries(body).forEach(([key, value]) => {
         url.searchParams.append(key, value as string);
       });
     }
-
     const response = await fetch(url.toString(), {
       method,
       headers: {
@@ -163,7 +160,6 @@ export class BrevilabsClient {
       }
     }
     logInfo(`==== ${endpoint} request ====:`, data);
-
     return { data };
   }
 
@@ -178,9 +174,7 @@ export class BrevilabsClient {
 
     // Add user_id to FormData
     formData.append("user_id", getSettings().userId);
-
     const url = new URL(`${BREVILABS_API_BASE_URL}${endpoint}`);
-
     try {
       const response = await fetch(url.toString(), {
         method: "POST",
@@ -191,7 +185,6 @@ export class BrevilabsClient {
         },
         body: formData,
       });
-
       const data = await response.json();
       if (!response.ok) {
         try {

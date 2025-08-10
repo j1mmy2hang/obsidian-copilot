@@ -1,33 +1,27 @@
 import { ChatButtons } from "@/components/chat-components/ChatButtons";
-import { ToolCallBanner } from "@/components/chat-components/ToolCallBanner";
 import { SourcesModal } from "@/components/modals/SourcesModal";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { USER_SENDER } from "@/constants";
 import { cn } from "@/lib/utils";
-import { parseToolCallMarkers } from "@/LLMProviders/chainRunner/utils/toolCallParser";
-import { ChatMessage } from "@/types/message";
-import { cleanMessageForCopy, insertIntoEditor } from "@/utils";
+import { ChatMessage } from "@/sharedState";
+import { insertIntoEditor } from "@/utils";
 import { Bot, User } from "lucide-react";
 import { App, Component, MarkdownRenderer, MarkdownView, TFile } from "obsidian";
+import { diffTrimmedLines, Change } from "diff";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import ReactDOM, { Root } from "react-dom/client";
-
-declare global {
-  interface Window {
-    __copilotToolCallRoots?: Map<string, Map<string, Root>>;
-  }
-}
+import { createRoot, Root } from "react-dom/client";
+import { ComposerCodeBlock } from "./ComposerCodeBlock";
 
 function MessageContext({ context }: { context: ChatMessage["context"] }) {
-  if (!context || (!context.notes?.length && !context.urls?.length)) {
+  if (!context || (context.notes.length === 0 && context.urls.length === 0)) {
     return null;
   }
 
   return (
     <div className="tw-flex tw-flex-wrap tw-gap-2">
-      {context.notes.map((note, index) => (
-        <Tooltip key={`${index}-${note.path}`}>
+      {context.notes.map((note) => (
+        <Tooltip key={note.path}>
           <TooltipTrigger asChild>
             <Badge variant="secondary">
               <span className="tw-max-w-40 tw-truncate">{note.basename}</span>
@@ -36,8 +30,8 @@ function MessageContext({ context }: { context: ChatMessage["context"] }) {
           <TooltipContent>{note.path}</TooltipContent>
         </Tooltip>
       ))}
-      {context.urls.map((url, index) => (
-        <Tooltip key={`${index}-${url}`}>
+      {context.urls.map((url) => (
+        <Tooltip key={url}>
           <TooltipTrigger asChild>
             <Badge variant="secondary">
               <span className="tw-max-w-40 tw-truncate">{url}</span>
@@ -75,38 +69,13 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
   const contentRef = useRef<HTMLDivElement>(null);
   const componentRef = useRef<Component | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // Use a stable ID for the message to preserve tool call roots across re-renders
-  const messageId = useRef(
-    message.timestamp?.epoch
-      ? String(message.timestamp.epoch)
-      : `temp-${Date.now()}-${Math.random()}`
-  );
-
-  // Store roots in a global map to preserve them across component instances
-  const getGlobalRootsMap = () => {
-    if (!window.__copilotToolCallRoots) {
-      window.__copilotToolCallRoots = new Map<string, Map<string, Root>>();
-    }
-    return window.__copilotToolCallRoots;
-  };
-
-  const getRootsForMessage = () => {
-    const globalMap = getGlobalRootsMap();
-    if (!globalMap.has(messageId.current)) {
-      globalMap.set(messageId.current, new Map<string, Root>());
-    }
-    return globalMap.get(messageId.current)!;
-  };
-
-  const rootsRef = useRef<Map<string, Root>>(getRootsForMessage());
 
   const copyToClipboard = () => {
     if (!navigator.clipboard || !navigator.clipboard.writeText) {
       return;
     }
 
-    const cleanedContent = cleanMessageForCopy(message.message);
-    navigator.clipboard.writeText(cleanedContent).then(() => {
+    navigator.clipboard.writeText(message.message).then(() => {
       setIsCopied(true);
 
       setTimeout(() => {
@@ -120,93 +89,70 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
       const activeFile = app.workspace.getActiveFile();
       const sourcePath = activeFile ? activeFile.path : "";
 
-      const processCollapsibleSection = (
-        content: string,
-        tagName: string,
-        summaryText: string,
-        streamingSummaryText: string
-      ): string => {
+      const processThinkSection = (content: string): string => {
         // Common styles as template strings
         const detailsStyle = `margin: 0.5rem 0 1.5rem; padding: 0.75rem; border: 1px solid var(--background-modifier-border); border-radius: 4px; background-color: var(--background-secondary)`;
         const summaryStyle = `cursor: pointer; color: var(--text-muted); font-size: 0.8em; margin-bottom: 0.5rem; user-select: none`;
         const contentStyle = `margin-top: 0.75rem; padding: 0.75rem; border-radius: 4px; background-color: var(--background-primary)`;
 
-        const openTag = `<${tagName}>`;
-
-        // During streaming, if we find any tag that's either unclosed or being processed
-        if (isStreaming && content.includes(openTag)) {
-          // Replace any complete sections first
-          const completeRegex = new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, "g");
-          content = content.replace(completeRegex, (match, sectionContent) => {
+        // During streaming, if we find any think tag that's either unclosed or being processed
+        if (isStreaming && content.includes("<think>")) {
+          // Replace any complete think sections first
+          content = content.replace(/<think>([\s\S]*?)<\/think>/g, (match, thinkContent) => {
             return `<details style="${detailsStyle}">
-              <summary style="${summaryStyle}">${summaryText}</summary>
-              <div class="tw-text-muted" style="${contentStyle}">${sectionContent.trim()}</div>
+              <summary style="${summaryStyle}">Thought for a second</summary>
+              <div class="tw-text-muted" style="${contentStyle}">${thinkContent.trim()}</div>
             </details>\n\n`;
           });
 
-          // Then handle any unclosed tag, but preserve the streamed content
-          const unClosedRegex = new RegExp(`<${tagName}>([\\s\\S]*)$`);
+          // Then handle any unclosed think tag, but preserve the streamed content
           content = content.replace(
-            unClosedRegex,
+            /<think>([\s\S]*)$/,
             (match, partialContent) => `<div style="${detailsStyle}">
-              <div style="${summaryStyle}">${streamingSummaryText}</div>
+              <div style="${summaryStyle}">Thinking...</div>
               <div class="tw-text-muted" style="${contentStyle}">${partialContent.trim()}</div>
             </div>`
           );
           return content;
         }
 
-        // Not streaming, process all sections normally
-        const regex = new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, "g");
-        return content.replace(regex, (match, sectionContent) => {
+        // Not streaming, process all think sections normally
+        const thinkRegex = /<think>([\s\S]*?)<\/think>/g;
+        return content.replace(thinkRegex, (match, thinkContent) => {
           return `<details style="${detailsStyle}">
-            <summary style="${summaryStyle}">${summaryText}</summary>
-            <div class="tw-text-muted" style="${contentStyle}">${sectionContent.trim()}</div>
+            <summary style="${summaryStyle}">Thought for a second</summary>
+            <div class="tw-text-muted" style="${contentStyle}">${thinkContent.trim()}</div>
           </details>\n\n`;
         });
       };
 
-      const processThinkSection = (content: string): string => {
-        return processCollapsibleSection(content, "think", "Thought for a while", "Thinking...");
-      };
-
-      const processWriteToFileSection = (content: string): string => {
-        // First, unwrap any XML codeblocks that contain writeToFile tags
-        const unwrapXmlCodeblocks = (text: string): string => {
-          // Pattern to match XML codeblocks that contain writeToFile tags
-          const xmlCodeblockRegex =
-            /```xml\s*([\s\S]*?<writeToFile>[\s\S]*?<\/writeToFile>[\s\S]*?)\s*```/g;
-
-          return text.replace(xmlCodeblockRegex, (match, xmlContent) => {
-            // Extract just the content inside the codeblock and return it without the codeblock wrapper
-            return xmlContent.trim();
-          });
+      // Showing loading placeholders for composer output during streaming
+      const processComposerCodeBlocks = (text: string): string => {
+        // Helper function to create the loading placeholder
+        const createPlaceholder = (path: string) => {
+          return `⏳ Generating changes for ${path}...`;
         };
 
-        // During streaming, also handle unclosed writeToFile tags in XML codeblocks
-        const unwrapStreamingXmlCodeblocks = (text: string): string => {
-          if (!isStreaming) return text;
+        if (isStreaming) {
+          // Look for any content containing "type": "composer"
+          const composerRegex = /(\{[\s\S]*?"type"\s*:\s*"composer"[\s\S]*?)(?=\}|$)/g;
 
-          // Pattern to match XML codeblocks that contain unclosed writeToFile tags
-          const streamingXmlCodeblockRegex = /```xml\s*([\s\S]*?<writeToFile>[\s\S]*?)$/g;
+          let match;
+          while ((match = composerRegex.exec(text)) !== null) {
+            const jsonStr = match[1];
+            const start = match.index;
 
-          return text.replace(streamingXmlCodeblockRegex, (match, xmlContent) => {
-            // Extract the content and return it without the codeblock wrapper
-            return xmlContent.trim();
-          });
-        };
+            // Try to extract the path if available
+            const pathMatch = jsonStr.match(/"path"\s*:\s*"([^"]+)"/);
+            const path = pathMatch ? pathMatch[1].trim() : "...";
 
-        // Unwrap XML codeblocks first
-        let processedContent = unwrapXmlCodeblocks(content);
-        processedContent = unwrapStreamingXmlCodeblocks(processedContent);
+            // Replace from the start of the JSON to the end of the text
+            text = text.substring(0, start) + createPlaceholder(path);
+            break; // Only process the first match
+          }
+        }
 
-        // Then process the writeToFile sections normally
-        return processCollapsibleSection(
-          processedContent,
-          "writeToFile",
-          "Generated new content",
-          "Generating changes..."
-        );
+        return text;
       };
 
       const replaceLinks = (text: string, regex: RegExp, template: (file: TFile) => string) => {
@@ -236,9 +182,12 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
         .replace(/\\\(\s*/g, "$")
         .replace(/\s*\\\)/g, "$");
 
+      // Process code blocks first for streaming case
+      const codeBlocksProcessed = processComposerCodeBlocks(latexProcessed);
+
       // Process only Obsidian internal images (starting with ![[)
       const noteImageProcessed = replaceLinks(
-        latexProcessed,
+        codeBlocksProcessed,
         /!\[\[(.*?)]]/g,
         (file) => `![](${app.vault.getResourcePath(file)})`
       );
@@ -246,11 +195,8 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
       // Process think sections
       const thinkSectionProcessed = processThinkSection(noteImageProcessed);
 
-      // Process writeToFile sections
-      const writeToFileSectionProcessed = processWriteToFileSection(thinkSectionProcessed);
-
       // Transform markdown sources section into HTML structure
-      const sourcesSectionProcessed = processSourcesSection(writeToFileSectionProcessed);
+      const sourcesSectionProcessed = processSourcesSection(thinkSectionProcessed);
 
       // Transform [[link]] to clickable format but exclude ![[]] image links
       const noteLinksProcessed = replaceLinks(
@@ -290,197 +236,137 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
   };
 
   useEffect(() => {
+    const roots: Root[] = [];
     let isUnmounting = false;
 
     if (contentRef.current && message.sender !== USER_SENDER) {
+      contentRef.current.innerHTML = "";
+
       // Create a new Component instance if it doesn't exist
       if (!componentRef.current) {
         componentRef.current = new Component();
       }
 
       const processedMessage = preprocess(message.message);
-      const parsedMessage = parseToolCallMarkers(processedMessage);
 
       if (!isUnmounting) {
-        // Track existing tool call IDs
-        const existingToolCallIds = new Set<string>();
-        const existingElements = contentRef.current.querySelectorAll('[id^="tool-call-"]');
-        existingElements.forEach((el) => {
-          const id = el.id.replace("tool-call-", "");
-          existingToolCallIds.add(id);
-        });
-
-        // Clear only text content divs, preserve tool call containers
-        const textDivs = contentRef.current.querySelectorAll(".message-segment");
-        textDivs.forEach((div) => div.remove());
-
-        // Process segments and only update what's needed
-        let currentIndex = 0;
-        parsedMessage.segments.forEach((segment, index) => {
-          if (segment.type === "text" && segment.content.trim()) {
-            // Find where to insert this text segment
-            const insertBefore = contentRef.current!.children[currentIndex];
-
-            const textDiv = document.createElement("div");
-            textDiv.className = "message-segment";
-
-            if (insertBefore) {
-              contentRef.current!.insertBefore(textDiv, insertBefore);
-            } else {
-              contentRef.current!.appendChild(textDiv);
-            }
-
-            MarkdownRenderer.renderMarkdown(segment.content, textDiv, "", componentRef.current!);
-            currentIndex++;
-          } else if (segment.type === "toolCall" && segment.toolCall) {
-            const toolCallId = segment.toolCall.id;
-            const existingDiv = document.getElementById(`tool-call-${toolCallId}`);
-
-            if (existingDiv) {
-              // Update existing tool call
-              const root = rootsRef.current.get(toolCallId);
-              if (root) {
-                root.render(
-                  <ToolCallBanner
-                    toolName={segment.toolCall.toolName}
-                    displayName={segment.toolCall.displayName}
-                    emoji={segment.toolCall.emoji}
-                    isExecuting={segment.toolCall.isExecuting}
-                    result={segment.toolCall.result || null}
-                    confirmationMessage={segment.toolCall.confirmationMessage}
-                  />
-                );
-              }
-              currentIndex++;
-            } else {
-              // Create new tool call
-              const insertBefore = contentRef.current!.children[currentIndex];
-              const toolDiv = document.createElement("div");
-              toolDiv.className = "tool-call-container";
-              toolDiv.id = `tool-call-${toolCallId}`;
-
-              if (insertBefore) {
-                contentRef.current!.insertBefore(toolDiv, insertBefore);
-              } else {
-                contentRef.current!.appendChild(toolDiv);
-              }
-
-              const root = ReactDOM.createRoot(toolDiv);
-              rootsRef.current.set(toolCallId, root);
-
-              root.render(
-                <ToolCallBanner
-                  toolName={segment.toolCall.toolName}
-                  displayName={segment.toolCall.displayName}
-                  emoji={segment.toolCall.emoji}
-                  isExecuting={segment.toolCall.isExecuting}
-                  result={segment.toolCall.result || null}
-                  confirmationMessage={segment.toolCall.confirmationMessage}
-                />
-              );
-              currentIndex++;
-            }
-          }
-        });
-
-        // Clean up any tool calls that no longer exist
-        const currentToolCallIds = new Set(
-          parsedMessage.segments
-            .filter((s) => s.type === "toolCall" && s.toolCall)
-            .map((s) => s.toolCall!.id)
+        // Use Obsidian's MarkdownRenderer to render the message
+        MarkdownRenderer.renderMarkdown(
+          processedMessage,
+          contentRef.current,
+          "", // Empty string for sourcePath as we don't have a specific source file
+          componentRef.current
         );
 
-        existingToolCallIds.forEach((id) => {
-          if (!currentToolCallIds.has(id)) {
-            const element = document.getElementById(`tool-call-${id}`);
-            if (element) {
-              const root = rootsRef.current.get(id);
-              if (root) {
-                // Defer unmounting to avoid React rendering conflicts
-                setTimeout(() => {
-                  try {
-                    root.unmount();
-                  } catch (error) {
-                    console.debug("Error unmounting tool call root:", error);
+        // Only process code blocks with file paths after streaming is complete
+        if (!isStreaming) {
+          // Process code blocks after rendering
+          const codeBlocks = contentRef.current.querySelectorAll("pre");
+          if (codeBlocks.length > 0) {
+            codeBlocks.forEach((pre) => {
+              if (isUnmounting) return;
+
+              const codeElement = pre.querySelector("code");
+              if (!codeElement) return;
+
+              const originalCode = codeElement.textContent || "";
+
+              // Check for JSON composer format
+              try {
+                // Look for complete JSON objects
+                if (originalCode.trim().startsWith("{") && originalCode.trim().endsWith("}")) {
+                  const composerData = JSON.parse(originalCode);
+                  if (
+                    composerData.type === "composer" &&
+                    composerData.path &&
+                    // `content` and `canvas_json` should never exist together
+                    (typeof composerData.content === "string" ||
+                      typeof composerData.canvas_json === "string")
+                  ) {
+                    let newContent;
+                    if (typeof composerData.content === "string") {
+                      newContent = composerData.content;
+                    } else {
+                      newContent = JSON.stringify(composerData.canvas_json);
+                    }
+                    let path = composerData.path.trim();
+                    // If path starts with a /, remove it
+                    if (path.startsWith("/")) {
+                      path = path.slice(1);
+                    }
+
+                    // Create a container for the React component
+                    const container = document.createElement("div");
+                    pre.parentNode?.replaceChild(container, pre);
+
+                    // Create a root and render the CodeBlock component
+                    const root = createRoot(container);
+                    roots.push(root);
+                    const file = app.vault.getAbstractFileByPath(path);
+                    let note_changes: Change[] = [];
+
+                    // Use async IIFE here
+                    (async () => {
+                      if (file instanceof TFile) {
+                        // Update existing file
+                        const originalContent = await app.vault.read(file);
+                        note_changes = diffTrimmedLines(originalContent, newContent, {
+                          newlineIsToken: true,
+                        });
+                      } else {
+                        // Create new file
+                        // get the file name from `path` without the extension
+                        const fileName = path.split("/").pop()?.split(".")[0];
+                        // Check first line of content for `# ${fileName}\n` and remove it
+                        const lines = newContent.split("\n");
+                        if (lines[0] === `# ${fileName}\n` || lines[0] === `## ${fileName}`) {
+                          lines.shift();
+                        }
+                        newContent = lines.join("\n");
+                      }
+
+                      if (!isUnmounting) {
+                        root.render(
+                          <ComposerCodeBlock
+                            note_path={path}
+                            note_content={newContent}
+                            note_changes={note_changes}
+                          />
+                        );
+                      }
+                    })();
                   }
-                  rootsRef.current.delete(id);
-                }, 0);
+                }
+              } catch (e) {
+                console.error("Failed to parse composer JSON:", e);
               }
-              element.remove();
-            }
+            });
           }
-        });
+        }
       }
     }
 
     // Cleanup function
     return () => {
       isUnmounting = true;
-    };
-  }, [message, app, componentRef, isStreaming, preprocess]);
 
-  // Cleanup effect that only runs on component unmount
-  useEffect(() => {
-    const currentComponentRef = componentRef;
-    const currentMessageId = messageId.current;
-
-    // Clean up old message roots to prevent memory leaks (older than 1 hour)
-    const cleanupOldRoots = () => {
-      const globalMap = getGlobalRootsMap();
-      const oneHourAgo = Date.now() - 60 * 60 * 1000;
-
-      globalMap.forEach((roots, msgId) => {
-        // Extract timestamp from message ID if it's in epoch format
-        const timestamp = parseInt(msgId);
-        if (!isNaN(timestamp) && timestamp < oneHourAgo) {
-          // Defer cleanup to avoid React rendering conflicts
-          setTimeout(() => {
-            roots.forEach((root) => {
-              try {
-                root.unmount();
-              } catch {
-                // Ignore errors
-              }
-            });
-            globalMap.delete(msgId);
-          }, 0);
-        }
-      });
-    };
-
-    // Run cleanup on mount
-    cleanupOldRoots();
-
-    return () => {
-      // Defer cleanup to avoid React rendering conflicts
+      // Schedule cleanup to run after current render cycle
       setTimeout(() => {
-        // Clean up component
-        if (currentComponentRef.current) {
-          currentComponentRef.current.unload();
-          currentComponentRef.current = null;
+        if (componentRef.current) {
+          componentRef.current.unload();
+          componentRef.current = null;
         }
 
-        // Only clean up roots if this is a temporary message (streaming message)
-        // Permanent messages keep their roots to preserve tool call banners
-        if (currentMessageId.startsWith("temp-")) {
-          const globalMap = getGlobalRootsMap();
-          const messageRoots = globalMap.get(currentMessageId);
-
-          if (messageRoots) {
-            messageRoots.forEach((root) => {
-              try {
-                root.unmount();
-              } catch (error) {
-                // Ignore unmount errors during cleanup
-                console.debug("Error unmounting React root during cleanup:", error);
-              }
-            });
-            globalMap.delete(currentMessageId);
+        roots.forEach((root) => {
+          try {
+            root.unmount();
+          } catch {
+            // Ignore unmount errors during cleanup
           }
-        }
+        });
       }, 0);
     };
-  }, []); // Empty dependency array ensures this only runs on unmount
+  }, [message, app, componentRef, isStreaming, preprocess]);
 
   useEffect(() => {
     if (isEditing && textareaRef.current) {
@@ -507,15 +393,7 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault(); // Prevents adding a newline to the textarea
       handleSaveEdit();
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      handleCancelEdit();
     }
-  };
-
-  const handleCancelEdit = () => {
-    setIsEditing(false);
-    setEditedMessage(message.message);
   };
 
   const handleEdit = () => {
@@ -544,8 +422,7 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
 
     const editor = leaf.view.editor;
     const hasSelection = editor.getSelection().length > 0;
-    const cleanedContent = cleanMessageForCopy(message.message);
-    insertIntoEditor(cleanedContent, hasSelection);
+    insertIntoEditor(message.message, hasSelection);
   };
 
   const renderMessageContent = () => {
@@ -562,6 +439,7 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
                       value={editedMessage}
                       onChange={handleTextareaChange}
                       onKeyDown={handleKeyDown}
+                      onBlur={handleSaveEdit}
                       autoFocus
                       className="edit-textarea"
                     />
@@ -601,6 +479,7 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
         value={editedMessage}
         onChange={handleTextareaChange}
         onKeyDown={handleKeyDown}
+        onBlur={handleSaveEdit}
         autoFocus
         className="edit-textarea"
       />

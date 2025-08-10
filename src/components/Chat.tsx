@@ -8,55 +8,66 @@ import {
   useModelKey,
   useSelectedTextContexts,
 } from "@/aiParams";
-import { useProjectContextStatus } from "@/hooks/useProjectContextStatus";
 import { ChainType } from "@/chainFactory";
-
+import { updateChatMemory } from "@/chatUtils";
+import { processPrompt } from "@/commands/customCommandUtils";
 import { ChatControls, reloadCurrentProject } from "@/components/chat-components/ChatControls";
 import ChatInput from "@/components/chat-components/ChatInput";
 import ChatMessages from "@/components/chat-components/ChatMessages";
 import { NewVersionBanner } from "@/components/chat-components/NewVersionBanner";
 import { ProjectList } from "@/components/chat-components/ProjectList";
-import { ABORT_REASON, EVENT_NAMES, LOADING_MESSAGES, USER_SENDER } from "@/constants";
+import { ABORT_REASON, COMMAND_IDS, EVENT_NAMES, LOADING_MESSAGES, USER_SENDER } from "@/constants";
 import { AppContext, EventTargetContext } from "@/context";
-import { useChatManager } from "@/hooks/useChatManager";
+import { ContextProcessor } from "@/contextProcessor";
 import { getAIResponse } from "@/langchainStream";
 import ChainManager from "@/LLMProviders/chainManager";
 import CopilotPlugin from "@/main";
 import { Mention } from "@/mentions/Mention";
 import { useIsPlusUser } from "@/plusUtils";
-import { updateSetting, useSettingsValue } from "@/settings/model";
-import { ChatUIState } from "@/state/ChatUIState";
+import {
+  getComposerOutputPrompt,
+  getSettings,
+  updateSetting,
+  useSettingsValue,
+} from "@/settings/model";
+import SharedState, { ChatMessage, useSharedState } from "@/sharedState";
 import { FileParserManager } from "@/tools/FileParserManager";
-import { err2String } from "@/utils";
+import { err2String, formatDateTime } from "@/utils";
 import { Buffer } from "buffer";
-import { Notice, TFile } from "obsidian";
+import { Notice, TFile, TFolder, Vault } from "obsidian";
 import React, { useCallback, useContext, useEffect, useRef, useState } from "react";
-import ProgressCard from "@/components/project/progress-card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
+import { Button } from "@/components/ui/button";
+import { ChevronDown } from "lucide-react";
 
 type ChatMode = "default" | "project";
 
 interface ChatProps {
+  sharedState: SharedState;
   chainManager: ChainManager;
   onSaveChat: (saveAsNote: () => Promise<void>) => void;
   updateUserMessageHistory: (newMessage: string) => void;
   fileParserManager: FileParserManager;
   plugin: CopilotPlugin;
   mode?: ChatMode;
-  chatUIState: ChatUIState;
 }
 
 const Chat: React.FC<ChatProps> = ({
+  sharedState,
   chainManager,
   onSaveChat,
   updateUserMessageHistory,
   fileParserManager,
   plugin,
-  chatUIState,
 }) => {
   const settings = useSettingsValue();
   const eventTarget = useContext(EventTargetContext);
-
-  const { messages: chatHistory, addMessage } = useChatManager(chatUIState);
+  const [chatHistory, addMessage, clearMessages] = useSharedState(sharedState);
   const [currentModelKey] = useModelKey();
   const [currentChain] = useChainType();
   const [currentAiMessage, setCurrentAiMessage] = useState("");
@@ -65,32 +76,10 @@ const Chat: React.FC<ChatProps> = ({
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState(LOADING_MESSAGES.DEFAULT);
   const [contextNotes, setContextNotes] = useState<TFile[]>([]);
-  const [includeActiveNote, setIncludeActiveNote] = useState(false);
+  const [includeActiveNote, setIncludeActiveNote] = useState(true);
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [showChatUI, setShowChatUI] = useState(false);
-  // null: keep default behavior; true: show; false: hide
-  const [progressCardVisible, setProgressCardVisible] = useState<boolean | null>(null);
-
   const [selectedTextContexts] = useSelectedTextContexts();
-  const projectContextStatus = useProjectContextStatus();
-
-  // Calculate whether to show ProgressCard based on status and user preference
-  const shouldShowProgressCard = () => {
-    if (selectedChain !== ChainType.PROJECT_CHAIN) return false;
-
-    // If user has explicitly set visibility, respect that choice
-    if (progressCardVisible !== null) {
-      return progressCardVisible;
-    }
-
-    // Default behavior: show for loading/error, hide for success
-    return projectContextStatus === "loading" || projectContextStatus === "error";
-  };
-
-  // Reset user preference when status changes to allow default behavior
-  useEffect(() => {
-    setProgressCardVisible(null);
-  }, [projectContextStatus]);
 
   const [previousMode, setPreviousMode] = useState<ChainType | null>(null);
   const [selectedChain, setSelectedChain] = useChainType();
@@ -98,21 +87,14 @@ const Chat: React.FC<ChatProps> = ({
 
   const mention = Mention.getInstance();
 
+  const contextProcessor = ContextProcessor.getInstance();
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  useEffect(() => {
-    const handleChatVisibility = () => {
-      if (inputRef.current) {
-        inputRef.current.focus();
-      }
-    };
-    eventTarget?.addEventListener(EVENT_NAMES.CHAT_IS_VISIBLE, handleChatVisibility);
-
-    // Cleanup function
-    return () => {
-      eventTarget?.removeEventListener(EVENT_NAMES.CHAT_IS_VISIBLE, handleChatVisibility);
-    };
-  }, [eventTarget]);
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [systemPromptName, setSystemPromptName] = useState<string>("");
+  const [showSystemPrompt, setShowSystemPrompt] = useState(false);
+  const [promptFiles, setPromptFiles] = useState<TFile[]>([]);
+  const [loadingPrompts, setLoadingPrompts] = useState(false);
 
   const appContext = useContext(AppContext);
   const app = plugin.app || appContext;
@@ -120,7 +102,7 @@ const Chat: React.FC<ChatProps> = ({
   const handleSendMessage = async ({
     toolCalls,
     urls,
-    contextNotes: passedContextNotes,
+    contextNotes: passedContextNotes, // Rename to avoid shadowing
   }: {
     toolCalls?: string[];
     urls?: string[];
@@ -128,100 +110,152 @@ const Chat: React.FC<ChatProps> = ({
   } = {}) => {
     if (!inputMessage && selectedImages.length === 0) return;
 
-    try {
-      // Create message content array
-      const content: any[] = [];
+    const timestamp = formatDateTime(new Date());
 
-      // Add text content if present
-      if (inputMessage) {
-        content.push({
-          type: "text",
-          text: inputMessage,
-        });
-      }
+    // Create message content array
+    const content: any[] = [];
 
-      // Add images if present
-      for (const image of selectedImages) {
-        const imageData = await image.arrayBuffer();
-        const base64Image = Buffer.from(imageData).toString("base64");
-        content.push({
-          type: "image_url",
-          image_url: {
-            url: `data:${image.type};base64,${base64Image}`,
-          },
-        });
-      }
+    // Add text content if present
+    if (inputMessage) {
+      content.push({
+        type: "text",
+        text: inputMessage,
+      });
+    }
 
-      // Prepare context notes and deduplicate by path
-      const allNotes = [...(passedContextNotes || []), ...contextNotes];
-      const notes = allNotes.filter(
-        (note, index, array) => array.findIndex((n) => n.path === note.path) === index
-      );
+    // Add images if present
+    for (const image of selectedImages) {
+      const imageData = await image.arrayBuffer();
+      const base64Image = Buffer.from(imageData).toString("base64");
+      content.push({
+        type: "image_url",
+        image_url: {
+          url: `data:${image.type};base64,${base64Image}`,
+        },
+      });
+    }
 
-      // Handle composer prompt
-      let displayText = inputMessage;
+    const notes = [...(passedContextNotes || [])];
+    const activeNote = app.workspace.getActiveFile();
+    // Only include active note if not in Project mode
+    if (
+      includeActiveNote &&
+      selectedChain !== ChainType.PROJECT_CHAIN &&
+      activeNote &&
+      !notes.some((note) => note.path === activeNote.path)
+    ) {
+      notes.push(activeNote);
+    }
 
-      // Add tool calls if present
-      if (toolCalls) {
-        displayText += " " + toolCalls.join("\n");
-      }
-
-      // Create message context
-      const context = {
+    const userMessage: ChatMessage = {
+      message: inputMessage || "Image message",
+      originalMessage: inputMessage,
+      sender: USER_SENDER,
+      isVisible: true,
+      timestamp: timestamp,
+      content: content,
+      context: {
         notes,
         urls: urls || [],
         selectedTextContexts,
-      };
+      },
+    };
 
-      // Clear input and images
-      setInputMessage("");
-      setSelectedImages([]);
-      setLoading(true);
-      setLoadingMessage(LOADING_MESSAGES.DEFAULT);
+    // Clear input and images
+    setInputMessage("");
+    setSelectedImages([]);
 
-      // Send message through ChatManager (this handles all the complex context processing)
-      const messageId = await chatUIState.sendMessage(
-        displayText,
-        context,
-        currentChain,
-        includeActiveNote,
-        content.length > 0 ? content : undefined
-      );
+    // Add messages to chat history
+    addMessage(userMessage);
+    setLoading(true);
+    setLoadingMessage(LOADING_MESSAGES.DEFAULT);
 
-      // Add to user message history
-      if (inputMessage) {
-        updateUserMessageHistory(inputMessage);
-      }
-
-      // Autosave if enabled
-      if (settings.autosaveChat) {
-        handleSaveAsNote();
-      }
-
-      // Get the LLM message for AI processing
-      const llmMessage = chatUIState.getLLMMessage(messageId);
-      if (llmMessage) {
-        await getAIResponse(
-          llmMessage,
-          chainManager,
-          addMessage,
-          setCurrentAiMessage,
-          setAbortController,
-          { debug: settings.debug, updateLoadingMessage: setLoadingMessage }
-        );
-      }
-
-      // Autosave again after AI response
-      if (settings.autosaveChat) {
-        handleSaveAsNote();
-      }
-    } catch (error) {
-      console.error("Error sending message:", error);
-      new Notice("Failed to send message. Please try again.");
-    } finally {
-      setLoading(false);
-      setLoadingMessage(LOADING_MESSAGES.DEFAULT);
+    // First, add composer instruction if necessary
+    let processedInputMessage = inputMessage;
+    const composerPrompt = await getComposerOutputPrompt();
+    if (inputMessage.includes("@composer") && composerPrompt !== "") {
+      processedInputMessage =
+        inputMessage + "\n\n<output_format>\n" + composerPrompt + "\n</output_format>";
     }
+    // process the original user message for custom prompts
+    const { processedPrompt: processedUserMessage, includedFiles } = await processPrompt(
+      processedInputMessage || "",
+      "",
+      app.vault,
+      app.workspace.getActiveFile()
+    );
+
+    // Extract Mentions (such as URLs) from original input message only if using Copilot Plus chain
+    const urlContextAddition =
+      currentChain === ChainType.COPILOT_PLUS_CHAIN
+        ? await mention.processUrls(inputMessage || "")
+        : { urlContext: "", imageUrls: [] };
+
+    // Create set of file paths that were included in the custom prompt
+    const excludedNotePaths = new Set(includedFiles.map((file) => file.path));
+
+    // Add context notes, excluding those already processed by custom prompt
+    const noteContextAddition = await contextProcessor.processContextNotes(
+      excludedNotePaths,
+      fileParserManager,
+      app.vault,
+      notes,
+      includeActiveNote,
+      activeNote,
+      currentChain
+    );
+
+    // Process selected text contexts
+    const selectedTextContextAddition = contextProcessor.processSelectedTextContexts();
+
+    // Combine everything
+    const finalProcessedMessage =
+      processedUserMessage +
+      urlContextAddition.urlContext +
+      noteContextAddition +
+      selectedTextContextAddition;
+
+    let messageWithToolCalls = inputMessage;
+    // Add tool calls last
+    if (toolCalls) {
+      messageWithToolCalls += " " + toolCalls.join("\n");
+    }
+
+    const promptMessageHidden: ChatMessage = {
+      message: finalProcessedMessage,
+      originalMessage: messageWithToolCalls,
+      sender: USER_SENDER,
+      isVisible: false,
+      timestamp: timestamp,
+      content: content,
+      context: {
+        notes,
+        urls:
+          currentChain === ChainType.COPILOT_PLUS_CHAIN
+            ? [...(urls || []), ...urlContextAddition.imageUrls]
+            : urls || [],
+        selectedTextContexts,
+      },
+    };
+
+    // Add hidden user message to chat history
+    addMessage(promptMessageHidden);
+
+    // Add to user message history if there's text
+    if (inputMessage) {
+      updateUserMessageHistory(inputMessage);
+    }
+
+    await getAIResponse(
+      promptMessageHidden,
+      chainManager,
+      addMessage,
+      setCurrentAiMessage,
+      setAbortController,
+      { debug: settings.debug, updateLoadingMessage: setLoadingMessage, systemPrompt }
+    );
+    setLoading(false);
+    setLoadingMessage(LOADING_MESSAGES.DEFAULT);
   };
 
   const handleSaveAsNote = useCallback(async () => {
@@ -230,14 +264,100 @@ const Chat: React.FC<ChatProps> = ({
       return;
     }
 
+    // Filter visible messages
+    const visibleMessages = chatHistory.filter((message) => message.isVisible);
+
+    if (visibleMessages.length === 0) {
+      new Notice("No messages to save.");
+      return;
+    }
+
+    // Get the epoch of the first message
+    const firstMessageEpoch = visibleMessages[0].timestamp?.epoch || Date.now();
+
+    // Format the chat content
+    const chatContent = visibleMessages
+      .map(
+        (message) =>
+          `**${message.sender}**: ${message.message}\n[Timestamp: ${message.timestamp?.display}]`
+      )
+      .join("\n\n");
+
     try {
-      // Use the new ChatManager persistence functionality
-      await chatUIState.saveChat(currentModelKey);
+      // Check if the default folder exists or create it
+      const folder = app.vault.getAbstractFileByPath(settings.defaultSaveFolder);
+      if (!folder) {
+        await app.vault.createFolder(settings.defaultSaveFolder);
+      }
+
+      const { fileName: timestampFileName } = formatDateTime(new Date(firstMessageEpoch));
+
+      // Get the first user message
+      const firstUserMessage = visibleMessages.find((message) => message.sender === USER_SENDER);
+
+      // Get the first 10 words from the first user message and sanitize them
+      const firstTenWords = firstUserMessage
+        ? firstUserMessage.message
+            .split(/\s+/)
+            .slice(0, 10)
+            .join(" ")
+            .replace(/[\\/:*?"<>|]/g, "") // Remove invalid filename characters
+            .trim()
+        : "Untitled Chat";
+
+      // Parse the custom format and replace variables
+      let customFileName = settings.defaultConversationNoteName || "{$date}_{$time}__{$topic}";
+
+      // Create the file name (limit to 100 characters to avoid excessively long names)
+      customFileName = customFileName
+        .replace("{$topic}", firstTenWords.slice(0, 100).replace(/\s+/g, "_"))
+        .replace("{$date}", timestampFileName.split("_")[0])
+        .replace("{$time}", timestampFileName.split("_")[1]);
+
+      // Sanitize the final filename
+      const sanitizedFileName = customFileName.replace(/[\\/:*?"<>|]/g, "_");
+
+      // Add project ID as prefix for project-specific chat histories
+      const currentProject = getCurrentProject();
+      const filePrefix = currentProject ? `${currentProject.id}__` : "";
+      const noteFileName = `${settings.defaultSaveFolder}/${filePrefix}${sanitizedFileName}.md`;
+
+      // Add the timestamp, model, and project properties to the note content
+      const noteContentWithTimestamp = `---
+epoch: ${firstMessageEpoch}
+modelKey: ${currentModelKey}
+${currentProject ? `projectId: ${currentProject.id}` : ""}
+${currentProject ? `projectName: ${currentProject.name}` : ""}
+tags:
+  - ${settings.defaultConversationTag}
+${currentProject ? `  - project-${currentProject.name}` : ""}
+---
+
+${chatContent}`;
+
+      // Check if the file already exists
+      const existingFile = app.vault.getAbstractFileByPath(noteFileName);
+      if (existingFile instanceof TFile) {
+        // If the file exists, update its content
+        await app.vault.modify(existingFile, noteContentWithTimestamp);
+        new Notice(`Chat updated in existing note: ${noteFileName}`);
+      } else {
+        // If the file doesn't exist, create a new one
+        await app.vault.create(noteFileName, noteContentWithTimestamp);
+        new Notice(`Chat saved as note: ${noteFileName}`);
+      }
     } catch (error) {
       console.error("Error saving chat as note:", err2String(error));
       new Notice("Failed to save chat as note. Check console for details.");
     }
-  }, [app, chatUIState, currentModelKey]);
+  }, [
+    app,
+    chatHistory,
+    currentModelKey,
+    settings.defaultConversationTag,
+    settings.defaultSaveFolder,
+    settings.defaultConversationNoteName,
+  ]);
 
   const handleStopGenerating = useCallback(
     (reason?: ABORT_REASON) => {
@@ -257,36 +377,44 @@ const Chat: React.FC<ChatProps> = ({
 
   const handleRegenerate = useCallback(
     async (messageIndex: number) => {
-      if (messageIndex <= 0) {
-        new Notice("Cannot regenerate the first message.");
+      const lastUserMessageIndex = messageIndex - 1;
+
+      if (lastUserMessageIndex < 0 || chatHistory[lastUserMessageIndex].sender !== USER_SENDER) {
+        new Notice("Cannot regenerate the first message or a user message.");
         return;
       }
 
-      const messageToRegenerate = chatHistory[messageIndex];
-      if (!messageToRegenerate) {
-        new Notice("Message not found.");
-        return;
+      // Get the last user message
+      const lastUserMessage = chatHistory[lastUserMessageIndex];
+
+      // Remove all messages after the AI message to regenerate
+      const newChatHistory = chatHistory.slice(0, messageIndex);
+      clearMessages();
+      newChatHistory.forEach(addMessage);
+
+      // Update the chain's memory with the new chat history
+      chainManager.memoryManager.clearChatMemory();
+      for (let i = 0; i < newChatHistory.length; i += 2) {
+        const userMsg = newChatHistory[i];
+        const aiMsg = newChatHistory[i + 1];
+        if (userMsg && aiMsg) {
+          await chainManager.memoryManager
+            .getMemory()
+            .saveContext({ input: userMsg.message }, { output: aiMsg.message });
+        }
       }
 
-      // Clear current AI message and set loading state
-      setCurrentAiMessage("");
       setLoading(true);
       try {
-        const success = await chatUIState.regenerateMessage(
-          messageToRegenerate.id!,
+        const regeneratedResponse = await chainManager.runChain(
+          lastUserMessage,
+          new AbortController(),
           setCurrentAiMessage,
-          addMessage
+          addMessage,
+          { debug: settings.debug }
         );
-
-        if (!success) {
-          new Notice("Failed to regenerate message. Please try again.");
-        } else if (settings.debug) {
+        if (regeneratedResponse && settings.debug) {
           console.log("Message regenerated successfully");
-        }
-
-        // Autosave the chat if the setting is enabled
-        if (settings.autosaveChat) {
-          handleSaveAsNote();
         }
       } catch (error) {
         console.error("Error regenerating message:", error);
@@ -295,81 +423,108 @@ const Chat: React.FC<ChatProps> = ({
         setLoading(false);
       }
     },
-    [chatHistory, chatUIState, settings.debug, settings.autosaveChat, handleSaveAsNote, addMessage]
+    [addMessage, chainManager, chatHistory, clearMessages, settings.debug]
   );
 
   const handleEdit = useCallback(
     async (messageIndex: number, newMessage: string) => {
-      const messageToEdit = chatHistory[messageIndex];
-      if (!messageToEdit || messageToEdit.message === newMessage) {
+      const oldMessage = chatHistory[messageIndex].message;
+
+      // Check if the message has actually changed
+      if (oldMessage === newMessage) {
         return;
       }
 
-      try {
-        const success = await chatUIState.editMessage(
-          messageToEdit.id!,
-          newMessage,
-          currentChain,
-          includeActiveNote
-        );
+      const newChatHistory = [...chatHistory];
 
-        if (!success) {
-          new Notice("Failed to edit message. Please try again.");
-          return;
+      // Find and update all related messages (both visible and hidden)
+      for (let i = messageIndex; i < newChatHistory.length; i++) {
+        if (newChatHistory[i].originalMessage === oldMessage) {
+          newChatHistory[i].message = newMessage;
+          newChatHistory[i].originalMessage = newMessage;
+          newChatHistory[i].context = { notes: [], urls: [] };
         }
+      }
 
-        // For user messages, immediately truncate any AI responses and regenerate
-        if (messageToEdit.sender === USER_SENDER) {
-          // Check if there were AI responses after this message
-          const hadAIResponses = messageIndex < chatHistory.length - 1;
+      clearMessages();
+      newChatHistory.forEach(addMessage);
 
-          // Truncate all messages after this user message (removes old AI responses)
-          await chatUIState.truncateAfterMessageId(messageToEdit.id!);
+      // Update the chain's memory with the new chat history
+      await updateChatMemory(newChatHistory, chainManager.memoryManager);
 
-          // If there were AI responses, generate new ones
-          if (hadAIResponses) {
-            setLoading(true);
-            try {
-              const llmMessage = chatUIState.getLLMMessage(messageToEdit.id!);
-              if (llmMessage) {
-                await getAIResponse(
-                  llmMessage,
-                  chainManager,
-                  addMessage,
-                  setCurrentAiMessage,
-                  setAbortController,
-                  { debug: settings.debug, updateLoadingMessage: setLoadingMessage }
-                );
-              }
-            } catch (error) {
-              console.error("Error regenerating AI response:", error);
-              new Notice("Failed to regenerate AI response. Please try again.");
-            } finally {
-              setLoading(false);
-            }
-          }
-        }
-
-        // Autosave the chat if the setting is enabled
-        if (settings.autosaveChat) {
-          handleSaveAsNote();
-        }
-      } catch (error) {
-        console.error("Error editing message:", error);
-        new Notice("Failed to edit message. Please try again.");
+      // Trigger regeneration of the AI message if the edited message was from the user
+      if (
+        newChatHistory[messageIndex].sender === USER_SENDER &&
+        messageIndex < newChatHistory.length - 1
+      ) {
+        handleRegenerate(messageIndex + 1);
       }
     },
-    [
-      chatHistory,
-      chatUIState,
-      currentChain,
-      includeActiveNote,
-      addMessage,
-      chainManager,
-      settings.debug,
-      settings.autosaveChat,
-      handleSaveAsNote,
-    ]
+    [addMessage, chainManager.memoryManager, chatHistory, clearMessages, handleRegenerate]
+  );
+
+  const createEffect = (
+    eventType: string,
+    promptFn: (selectedText: string, eventSubtype?: string) => string | Promise<string>
+  ) => {
+    return () => {
+      const debug = getSettings().debug;
+      const handleSelection = async (event: CustomEvent) => {
+        const messageWithPrompt = await promptFn(
+          event.detail.selectedText,
+          event.detail.eventSubtype
+        );
+        // Create a user message with the selected text
+        const promptMessage: ChatMessage = {
+          message: messageWithPrompt,
+          sender: USER_SENDER,
+          isVisible: debug,
+          timestamp: formatDateTime(new Date()),
+        };
+
+        if (debug) {
+          addMessage(promptMessage);
+        }
+
+        setLoading(true);
+        await getAIResponse(
+          promptMessage,
+          chainManager,
+          addMessage,
+          setCurrentAiMessage,
+          setAbortController,
+          {
+            debug,
+            ignoreSystemMessage: true,
+          }
+        );
+        setLoading(false);
+      };
+
+      eventTarget?.addEventListener(eventType, handleSelection);
+
+      // Cleanup function to remove the event listener when the component unmounts
+      return () => {
+        eventTarget?.removeEventListener(eventType, handleSelection);
+      };
+    };
+  };
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(
+    createEffect(COMMAND_IDS.APPLY_ADHOC_PROMPT, async (selectedText, customPrompt) => {
+      if (!customPrompt) {
+        return selectedText;
+      }
+      const result = await processPrompt(
+        customPrompt,
+        selectedText,
+        app.vault,
+        app.workspace.getActiveFile()
+      );
+      return result.processedPrompt; // Extract just the processed prompt string
+    }),
+    []
   );
 
   // Expose handleSaveAsNote to parent
@@ -378,6 +533,19 @@ const Chat: React.FC<ChatProps> = ({
       onSaveChat(handleSaveAsNote);
     }
   }, [onSaveChat, handleSaveAsNote]);
+
+  const handleDelete = useCallback(
+    async (messageIndex: number) => {
+      const newChatHistory = [...chatHistory];
+      newChatHistory.splice(messageIndex, 1);
+      clearMessages();
+      newChatHistory.forEach(addMessage);
+
+      // Update the chain's memory with the new chat history
+      await updateChatMemory(newChatHistory, chainManager.memoryManager);
+    },
+    [addMessage, chainManager.memoryManager, chatHistory, clearMessages]
+  );
 
   const handleAddProject = useCallback(
     (project: ProjectConfig) => {
@@ -455,57 +623,32 @@ const Chat: React.FC<ChatProps> = ({
     removeSelectedTextContext(id);
   }, []);
 
-  const handleDelete = useCallback(
-    async (messageIndex: number) => {
-      const messageToDelete = chatHistory[messageIndex];
-      if (!messageToDelete) {
-        new Notice("Message not found.");
-        return;
-      }
-
-      try {
-        const success = await chatUIState.deleteMessage(messageToDelete.id!);
-        if (!success) {
-          new Notice("Failed to delete message. Please try again.");
-        }
-      } catch (error) {
-        console.error("Error deleting message:", error);
-        new Notice("Failed to delete message. Please try again.");
-      }
-    },
-    [chatHistory, chatUIState]
-  );
-
   const handleNewChat = useCallback(async () => {
     handleStopGenerating(ABORT_REASON.NEW_CHAT);
-
-    // First autosave the current chat if the setting is enabled
-    if (settings.autosaveChat) {
-      await handleSaveAsNote();
-    }
-
-    // Clear messages through the new architecture
-    chatUIState.clearMessages();
-
-    // Additional UI state reset specific to this component
+    await plugin.handleNewChat();
     setCurrentAiMessage("");
     setContextNotes([]);
     clearSelectedTextContexts();
-    // Only modify includeActiveNote if in a non-COPILOT_PLUS_CHAIN mode
-    // In COPILOT_PLUS_CHAIN mode, respect the settings.includeActiveNoteAsContext value
-    if (selectedChain !== ChainType.COPILOT_PLUS_CHAIN) {
-      setIncludeActiveNote(false);
+    setIncludeActiveNote(true);
+    // 自动选择 Standard prompt
+    const folder = app.vault.getAbstractFileByPath("copilot-custom-system-prompts");
+    if (folder instanceof TFolder) {
+      const standardFile = folder.children.find(
+        (f) => f instanceof TFile && f.extension === "md" && f.basename === "Standard"
+      ) as TFile | undefined;
+      if (standardFile) {
+        const content = await app.vault.read(standardFile);
+        setSystemPrompt(content);
+        setSystemPromptName("Standard");
+      } else {
+        setSystemPrompt("");
+        setSystemPromptName("");
+      }
     } else {
-      setIncludeActiveNote(settings.includeActiveNoteAsContext);
+      setSystemPrompt("");
+      setSystemPromptName("");
     }
-  }, [
-    handleStopGenerating,
-    chatUIState,
-    settings.autosaveChat,
-    settings.includeActiveNoteAsContext,
-    selectedChain,
-    handleSaveAsNote,
-  ]);
+  }, [handleStopGenerating, plugin, app.vault]);
 
   const handleLoadHistory = useCallback(() => {
     plugin.loadCopilotChatHistory();
@@ -528,85 +671,147 @@ const Chat: React.FC<ChatProps> = ({
 
   // Use the includeActiveNoteAsContext setting
   useEffect(() => {
-    if (settings.includeActiveNoteAsContext !== undefined) {
-      // Only apply the setting if not in Project mode
-      if (selectedChain === ChainType.COPILOT_PLUS_CHAIN) {
-        setIncludeActiveNote(settings.includeActiveNoteAsContext);
-      } else {
-        // In other modes, always disable including active note
-        setIncludeActiveNote(false);
-      }
-    }
-  }, [settings.includeActiveNoteAsContext, selectedChain]);
+    setIncludeActiveNote(true);
+  }, []);
 
-  // Note: pendingMessages loading has been removed as ChatManager now handles
-  // message persistence and loading automatically based on project context
+  // 读取 copilot-custom-system-prompts 文件夹下所有 md 文件
+  const loadPromptFiles = useCallback(async () => {
+    setLoadingPrompts(true);
+    try {
+      const folder = app.vault.getAbstractFileByPath("copilot-custom-system-prompts");
+      if (folder instanceof TFolder) {
+        const files = folder.children.filter(
+          (f) => f instanceof TFile && f.extension === "md"
+        ) as TFile[];
+        setPromptFiles(files);
+      } else {
+        setPromptFiles([]);
+      }
+    } finally {
+      setLoadingPrompts(false);
+    }
+  }, [app.vault]);
+
+  // dropdown 展开时加载 prompt 文件
+  useEffect(() => {
+    if (showSystemPrompt) {
+      loadPromptFiles();
+    }
+  }, [showSystemPrompt, loadPromptFiles]);
+
+  // 选择 prompt 文件并读取内容
+  const handleSelectPrompt = async (file: TFile) => {
+    const content = await app.vault.read(file);
+    setSystemPrompt(content);
+    setSystemPromptName(file.basename);
+    setShowSystemPrompt(false);
+  };
+
+  // 完全照抄 model selection dropdown menu 的 system prompt dropdown UI
+  const renderSystemPromptDropdown = () => (
+    <div
+      className="tw-relative tw-w-full tw-h-10 tw-flex tw-items-center tw-justify-center tw-bg-transparent"
+      style={{ minHeight: 40 }}
+    >
+      <DropdownMenu open={showSystemPrompt} onOpenChange={setShowSystemPrompt}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost2"
+            size="fit"
+            className="tw-gap-1 tw-px-2 tw-py-1 tw-h-7 tw-min-w-0 tw-max-w-xs tw-overflow-hidden tw-rounded-md tw-transition-colors tw-items-center tw-bg-transparent hover:tw-bg-transparent focus:tw-bg-transparent active:tw-bg-transparent"
+            aria-expanded={showSystemPrompt}
+          >
+            <span
+              className="tw-text-xs tw-max-w-32 tw-truncate tw-font-normal"
+              title={systemPromptName || undefined}
+            >
+              {systemPromptName || "System Prompt"}
+            </span>
+            <ChevronDown className="tw-size-5 tw-ml-1" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          className={
+            "tw-min-w-fit tw-mt-2 tw-bg-primary tw-rounded-md tw-shadow-md tw-border tw-border-solid tw-border-border tw-overflow-hidden tw-text-normal " +
+            "data-[state=open]:tw-animate-in data-[state=closed]:tw-animate-out data-[state=closed]:tw-fade-out-0 data-[state=open]:tw-fade-in-0 data-[state=closed]:tw-zoom-out-95 data-[state=open]:tw-zoom-in-95"
+          }
+        >
+          {loadingPrompts ? (
+            <div className="tw-text-center tw-text-xs tw-text-gray-400 tw-py-2">加载中...</div>
+          ) : promptFiles.length === 0 ? (
+            <div className="tw-text-center tw-text-xs tw-text-gray-400 tw-py-2">无可用 prompt</div>
+          ) : (
+            promptFiles.map((file) => (
+              <DropdownMenuItem
+                key={file.path}
+                onSelect={() => handleSelectPrompt(file)}
+                className={
+                  `tw-flex tw-items-center tw-text-xs tw-px-2 tw-py-1.5 tw-rounded-sm tw-transition-colors tw-cursor-pointer tw-text-normal` +
+                  (systemPromptName === file.basename ? " tw-bg-dropdown-hover tw-font-bold" : "")
+                }
+              >
+                <span className="tw-block tw-w-full tw-text-left tw-truncate">{file.basename}</span>
+              </DropdownMenuItem>
+            ))
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
 
   const renderChatComponents = () => (
     <>
       <div className="tw-flex tw-size-full tw-flex-col tw-overflow-hidden">
-        <NewVersionBanner currentVersion={plugin.manifest.version} />
-        <ChatMessages
-          chatHistory={chatHistory}
-          currentAiMessage={currentAiMessage}
-          loading={loading}
-          loadingMessage={loadingMessage}
-          app={app}
-          onRegenerate={handleRegenerate}
-          onEdit={handleEdit}
-          onDelete={handleDelete}
-          onInsertToChat={handleInsertToChat}
-          onReplaceChat={setInputMessage}
-          showHelperComponents={selectedChain !== ChainType.PROJECT_CHAIN}
-        />
-        {shouldShowProgressCard() ? (
-          <div className="tw-inset-0 tw-z-modal tw-flex tw-items-center tw-justify-center tw-rounded-xl">
-            <ProgressCard
-              plugin={plugin}
-              setHiddenCard={() => {
-                setProgressCardVisible(false);
-              }}
-            />
-          </div>
-        ) : (
-          <>
-            <ChatControls
-              onNewChat={handleNewChat}
-              onSaveAsNote={() => handleSaveAsNote()}
-              onLoadHistory={handleLoadHistory}
-              onModeChange={(newMode) => {
-                setPreviousMode(selectedChain);
-                // Hide chat UI when switching to project mode
-                if (newMode === ChainType.PROJECT_CHAIN) {
-                  setShowChatUI(false);
-                }
-              }}
-            />
-            <ChatInput
-              ref={inputRef}
-              inputMessage={inputMessage}
-              setInputMessage={setInputMessage}
-              handleSendMessage={handleSendMessage}
-              isGenerating={loading}
-              onStopGenerating={() => handleStopGenerating(ABORT_REASON.USER_STOPPED)}
-              app={app}
-              contextNotes={contextNotes}
-              setContextNotes={setContextNotes}
-              includeActiveNote={includeActiveNote}
-              setIncludeActiveNote={setIncludeActiveNote}
-              mention={mention}
-              selectedImages={selectedImages}
-              onAddImage={(files: File[]) => setSelectedImages((prev) => [...prev, ...files])}
-              setSelectedImages={setSelectedImages}
-              disableModelSwitch={selectedChain === ChainType.PROJECT_CHAIN}
-              selectedTextContexts={selectedTextContexts}
-              onRemoveSelectedText={handleRemoveSelectedText}
-              showProgressCard={() => {
-                setProgressCardVisible(true);
-              }}
-            />
-          </>
-        )}
+        {renderSystemPromptDropdown()}
+        <div className="tw-flex-1 tw-flex tw-flex-col tw-overflow-hidden">
+          <NewVersionBanner currentVersion={plugin.manifest.version} />
+          <ChatMessages
+            chatHistory={chatHistory}
+            currentAiMessage={currentAiMessage}
+            loading={loading}
+            loadingMessage={loadingMessage}
+            app={app}
+            onRegenerate={handleRegenerate}
+            onEdit={handleEdit}
+            onDelete={handleDelete}
+            onInsertToChat={handleInsertToChat}
+            onReplaceChat={setInputMessage}
+            showHelperComponents={selectedChain !== ChainType.PROJECT_CHAIN}
+          />
+          <ChatControls
+            onNewChat={handleNewChat}
+            onSaveAsNote={() => handleSaveAsNote()}
+            onLoadHistory={handleLoadHistory}
+            onModeChange={(newMode) => {
+              setPreviousMode(selectedChain);
+              // Hide chat UI when switching to project mode
+              if (newMode === ChainType.PROJECT_CHAIN) {
+                setShowChatUI(false);
+              }
+            }}
+          />
+          <ChatInput
+            ref={inputRef}
+            inputMessage={inputMessage}
+            setInputMessage={setInputMessage}
+            handleSendMessage={handleSendMessage}
+            isGenerating={loading}
+            onStopGenerating={() => handleStopGenerating(ABORT_REASON.USER_STOPPED)}
+            app={app}
+            contextNotes={contextNotes}
+            setContextNotes={setContextNotes}
+            includeActiveNote={includeActiveNote}
+            setIncludeActiveNote={setIncludeActiveNote}
+            mention={mention}
+            selectedImages={selectedImages}
+            onAddImage={(files: File[]) => setSelectedImages((prev) => [...prev, ...files])}
+            setSelectedImages={setSelectedImages}
+            disableModelSwitch={selectedChain === ChainType.PROJECT_CHAIN}
+            selectedTextContexts={selectedTextContexts}
+            onRemoveSelectedText={handleRemoveSelectedText}
+          />
+        </div>
       </div>
     </>
   );
@@ -637,9 +842,6 @@ const Chat: React.FC<ChatProps> = ({
                   }
                 }}
                 showChatUI={(v) => setShowChatUI(v)}
-                onProjectClose={() => {
-                  setProgressCardVisible(null);
-                }}
               />
             </div>
           )}

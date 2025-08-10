@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 const ChainType2Label: Record<ChainType, string> = {
   [ChainType.LLM_CHAIN]: "Chat",
   [ChainType.VAULT_QA_CHAIN]: "Vault QA (Basic)",
-  [ChainType.COPILOT_PLUS_CHAIN]: "Copilot Plus",
+  [ChainType.COPILOT_PLUS_CHAIN]: "Copilot Plus (beta)",
   [ChainType.PROJECT_CHAIN]: "Projects (alpha)",
 };
 
@@ -368,7 +368,7 @@ export const BasicSettings: React.FC = () => {
           <SettingItem
             type="switch"
             title="Autosave Chat"
-            description="Automatically saves the chat after every user message and AI response."
+            description="Automatically save the chat when starting a new one or when the plugin reloads"
             checked={settings.autosaveChat}
             onCheckedChange={(checked) => updateSetting("autosaveChat", checked)}
           />
